@@ -8,3 +8,18 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Generated visualization files
+eda_visualizations.png
+*.png
+*.jpg
+*.jpeg
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
