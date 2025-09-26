@@ -1,5 +1,6 @@
 def main():
-    print("Hello from proyecto!")
+    print("Hello from pyton!")
+    print("Hola mundo")
 
 
 if __name__ == "__main__":
