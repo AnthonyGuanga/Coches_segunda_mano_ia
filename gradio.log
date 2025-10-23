@@ -1,0 +1,17 @@
+nohup: no se tendrá en cuenta la entrada
+Traceback (most recent call last):
+  File "/home/daniel/projects/Coches_segunda_mano_ia/myenv/lib/python3.12/site-packages/gradio/queueing.py", line 759, in process_events
+    response = await route_utils.call_process_api(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/daniel/projects/Coches_segunda_mano_ia/myenv/lib/python3.12/site-packages/gradio/route_utils.py", line 354, in call_process_api
+    output = await app.get_blocks().process_api(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/daniel/projects/Coches_segunda_mano_ia/myenv/lib/python3.12/site-packages/gradio/blocks.py", line 2112, in process_api
+    inputs = await self.preprocess_data(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/daniel/projects/Coches_segunda_mano_ia/myenv/lib/python3.12/site-packages/gradio/blocks.py", line 1774, in preprocess_data
+    processed_input.append(block.preprocess(inputs_cached))
+                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/daniel/projects/Coches_segunda_mano_ia/myenv/lib/python3.12/site-packages/gradio/components/dropdown.py", line 206, in preprocess
+    raise Error(
+gradio.exceptions.Error: "Value: Focus is not in the list of choices: ['Corolla', 'Camry', 'RAV4']"

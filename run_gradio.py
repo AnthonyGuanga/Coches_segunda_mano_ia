@@ -1,4 +1,3 @@
-
 from typing import Any, Dict, List
 import httpx
 import gradio as gr
@@ -80,8 +79,7 @@ def build_demo():
 
 
 def main():
-    # Prefer an explicit app builder from uy_gradio_app if present.
-    # Keep a simple fallback to the basic demo builder defined here.
+
     demo_obj = None
     try:
         from uy_gradio_app import build_demo_extended
@@ -91,7 +89,6 @@ def main():
         print('Falling back to built-in demo()')
         demo_obj = build_demo()
 
-    # Determine a local IP to display to the user (best-effort)
     import socket
     local_ip = '127.0.0.1'
     try:
@@ -102,7 +99,7 @@ def main():
     except Exception:
         pass
     print(f'Starting Gradio on http://0.0.0.0:7860 (also available at http://{local_ip}:7860)')
-    # Launch and keep the server (binding to all interfaces so it's reachable on the LAN)
+
     demo_obj.launch(server_name='0.0.0.0', server_port=7860, share=False)
 
 

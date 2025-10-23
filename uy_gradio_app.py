@@ -46,9 +46,115 @@ def build_demo_extended():
     convert_currency = getattr(tools, 'convert_currency', lambda *a, **k: {'success': False, 'error': 'convert_currency missing'})
     rag_query = getattr(tools, 'rag_query', lambda *a, **k: {'success': False, 'error': 'rag_query missing'})
     assess_testability = getattr(tools, 'assess_testability', lambda *a, **k: {'success': False, 'error': 'assess_testability missing'})
+    check_vehicle_safety = getattr(tools, 'check_vehicle_safety', None)
+    if check_vehicle_safety is None:
+        # Try to salvage by loading the specific cell that defines check_vehicle_safety from the notebook
+        nbpath = Path(__file__).parent / 'uy_tools.ipynb'
+        if nbpath.exists():
+            nb = json.loads(nbpath.read_text())
+            code_cells = [c for c in nb.get('cells', []) if c.get('cell_type') == 'code']
+            target_src = None
+            for c in code_cells:
+                src = ''.join(c.get('source', []))
+                if 'def check_vehicle_safety' in src:
+                    target_src = src
+                    break
+            if target_src:
+                # Prepare safe globals with common typing names and httpx available
+                from typing import Dict, Any, List, Optional
+                safe_globals = {
+                    '__name__': 'uy_tools_loaded_partial',
+                    'httpx': httpx,
+                    'Dict': Dict,
+                    'Any': Any,
+                    'List': List,
+                    'Optional': Optional,
+                }
+                # Exec the target cell in a safeguarded globals dict; handle errors locally
+                try:
+                    exec(compile(target_src, '<uy_tools_check_vehicle>', 'exec'), safe_globals)
+                except Exception:
+                    # If execution fails, don't raise — we'll fallback below
+                    pass
+                if 'check_vehicle_safety' in safe_globals:
+                    check_vehicle_safety = safe_globals['check_vehicle_safety']
+                    # attach to tools module for future calls
+                    try:
+                        setattr(tools, 'check_vehicle_safety', check_vehicle_safety)
+                    except Exception:
+                        pass
+
+    if not callable(check_vehicle_safety):
+        # fallback lambda that returns a useful error for the UI
+        check_vehicle_safety = lambda *a, **k: {'success': False, 'error': 'check_vehicle_safety missing'}
 
     def weather_on_date_ui(lat: float, lon: float, date_str: str) -> Dict[str, Any]:
         return get_weather_on_date(lat, lon, date_str)
+
+    def _forecast_for_date(lat: float, lon: float, date_str: str) -> Dict[str, Any]:
+        """Fetch forecast data for a future date using Open-Meteo forecast API and return same summary shape as archive."""
+        try:
+            # ensure date object
+            d = None
+            try:
+                from datetime import datetime as _dt
+                d = _dt.fromisoformat(date_str).date() if isinstance(date_str, str) else date_str
+            except Exception:
+                return { 'success': False, 'error': 'Formato de fecha inválido' }
+
+            start = d.isoformat()
+            end = d.isoformat()
+            url = 'https://api.open-meteo.com/v1/forecast'
+            params = {
+                'latitude': lat,
+                'longitude': lon,
+                'start_date': start,
+                'end_date': end,
+                'hourly': 'temperature_2m,precipitation,windspeed_10m',
+                'timezone': 'UTC'
+            }
+            r = httpx.get(url, params=params, timeout=15.0)
+            r.raise_for_status()
+            data = r.json()
+            hourly = data.get('hourly', {})
+            temps = hourly.get('temperature_2m', [])
+            prec = hourly.get('precipitation', [])
+            wind = hourly.get('windspeed_10m', [])
+            summary = {}
+            if temps:
+                summary['temp_min'] = min(temps)
+                summary['temp_max'] = max(temps)
+                summary['temp_avg'] = sum(temps)/len(temps)
+            if prec:
+                summary['precip_total_mm'] = sum(prec)
+            if wind:
+                summary['wind_avg_kmh'] = (sum(wind)/len(wind))
+            return { 'success': True, 'date': start, 'summary': summary, 'raw': data }
+        except Exception as e:
+            return { 'success': False, 'error': str(e) }
+
+    def _assess_summary_testability(summary: Dict[str, Any], date_str: str) -> Dict[str, Any]:
+        """Evaluate testability from a weather summary dict (same heuristic as assess_testability)."""
+        reasons = []
+        score = 0
+        prec = summary.get('precip_total_mm', 0)
+        if prec and prec > 0.5:
+            reasons.append(f'Precipitación total {prec} mm — no ideal para probar')
+            score -= 2
+        wind = summary.get('wind_avg_kmh', 0)
+        if wind and wind > 40:
+            reasons.append(f'Viento medio {wind:.1f} km/h — precaución')
+            score -= 1
+        tmin = summary.get('temp_min')
+        tmax = summary.get('temp_max')
+        if tmin is not None and tmin < -5:
+            reasons.append(f'Baja temperatura {tmin}°C — puede afectar arranque/batería')
+            score -= 1
+        if tmax is not None and tmax > 40:
+            reasons.append(f'Alta temperatura {tmax}°C — precaución con motores/AC')
+            score -= 1
+        recommendation = 'Bien' if score >= 0 and not reasons else 'No recomendable' if score < 0 else 'Precaución'
+        return {'success': True, 'date': date_str, 'recommendation': recommendation, 'reasons': reasons, 'summary': summary}
 
     def _format_currency_output(resp, amount, frm, to):
         try:
@@ -231,7 +337,25 @@ def build_demo_extended():
 
                 def _weather_by_province(prov_name: str, date_str: str):
                     lat, lon = _prov_to_latlon(prov_name)
-                    res = weather_on_date_ui(lat, lon, date_str)
+                    # determine if the requested date is future or past
+                    from datetime import datetime, date as _date
+                    try:
+                        d = datetime.fromisoformat(date_str).date()
+                    except Exception:
+                        return 'Error: formato de fecha inválido. Usa YYYY-MM-DD.'
+
+                    today = _date.today()
+                    if d > today:
+                        # use forecast endpoint for future dates
+                        res = _forecast_for_date(lat, lon, date_str)
+                        # if we got a summary, assess it locally
+                        if res.get('success') and res.get('summary'):
+                            assess_res = _assess_summary_testability(res.get('summary'), res.get('date'))
+                        else:
+                            assess_res = { 'success': False, 'error': res.get('error') }
+                    else:
+                        res = weather_on_date_ui(lat, lon, date_str)
+                        assess_res = None
 
                     if not res or not res.get('success'):
                         err = res.get('error') if isinstance(res, dict) else 'No se pudo obtener datos para esa fecha.'
@@ -244,10 +368,12 @@ def build_demo_extended():
                     weather_md = fmt_weather_summary(res)
 
                     # Also call assess_testability to provide recommendation + reasons
-                    try:
-                        assess_res = assess_testability(date_str, lat, lon)
-                    except Exception as e:
-                        assess_res = { 'success': False, 'error': str(e) }
+                    # If assess_res was already computed for future dates, keep it.
+                    if assess_res is None:
+                        try:
+                            assess_res = assess_testability(date_str, lat, lon)
+                        except Exception as e:
+                            assess_res = { 'success': False, 'error': str(e) }
 
                     if assess_res.get('success'):
                         # Map recommendations to Spanish
@@ -288,6 +414,191 @@ def build_demo_extended():
                 btnr = gr.Button('Preguntar')
                 outr = gr.Markdown(label='Respuesta RAG')
                 btnr.click(fn=lambda s: fmt_rag(rag_ui(s)), inputs=q, outputs=outr)
+
+            with gr.TabItem('Seguridad / Recalls'):
+                gr.Markdown('### Comprobar recalls y calificaciones de seguridad (NHTSA)')
+                popular_makes = ['Honda', 'Toyota', 'Ford', 'Volkswagen', 'BMW', 'Nissan']
+                make_in = gr.Dropdown(choices=popular_makes, value=popular_makes[0], label='Marca (make)')
+                model_in = gr.Dropdown(choices=['(elige marca primero)'], value='(elige marca primero)', label='Modelo (model)')
+                year_in = gr.Dropdown(choices=['(elige modelo primero)'], value='(elige modelo primero)', label='Año (year)')
+                vin_in = gr.Textbox(value='', label='VIN (opcional)', placeholder='Opcional: VIN completo')
+                btns = gr.Button('Comprobar seguridad')
+                outsafety = gr.Markdown(label='Resultado Seguridad')
+
+                # helper to call NHTSA endpoints with simple error handling
+                def _nhtsa_get(path: str, params: dict):
+                    try:
+                        url = f'https://api.nhtsa.gov/{path}'
+                        r = httpx.get(url, params=params, timeout=8.0)
+                        r.raise_for_status()
+                        return { 'success': True, 'data': r.json() }
+                    except Exception as e:
+                        return { 'success': False, 'error': str(e) }
+
+                def _fetch_models_for_make(make: str):
+                    res = _nhtsa_get('vehicles/GetModelsForMake', {'make': make})
+                    if res.get('success'):
+                        data = res['data']
+                        results = data.get('Results') or []
+                        models = sorted({r.get('Model_Name') for r in results if r.get('Model_Name')})
+                        if models:
+                            return models
+                    # fallback small static mapping
+                    fallback = {
+                        'Honda': ['Civic','Accord','CR-V'],
+                        'Toyota': ['Corolla','Camry','RAV4'],
+                        'Ford': ['Focus','Fiesta','F-150'],
+                        'Volkswagen': ['Golf','Passat','Polo'],
+                        'BMW': ['3 Series','5 Series'],
+                        'Nissan': ['Sentra','Altima']
+                    }
+                    return fallback.get(make, [])
+
+                def _fetch_years_for_make_model(make: str, model: str):
+                    # Try to fetch available years by probing the recalls API over a recent range.
+                    years = []
+                    import datetime
+                    current = datetime.date.today().year
+                    for y in range(current, current-30, -1):
+                        try:
+                            # A light HEAD-like check via recallsByVehicle
+                            url = 'https://api.nhtsa.gov/recalls/recallsByVehicle'
+                            r = httpx.get(url, params={'make': make, 'model': model, 'modelYear': y}, timeout=6.0)
+                            if r.status_code == 200:
+                                years.append(str(y))
+                        except Exception:
+                            # ignore network errors per-year
+                            pass
+                    if years:
+                        return years
+                    return [str(y) for y in range(current, current-15, -1)]
+
+                # callbacks
+                def on_make_change(selected_make):
+                    models = _fetch_models_for_make(selected_make)
+                    if not models:
+                        return gr.update(choices=['(no se encontraron modelos)'], value='(no se encontraron modelos)')
+                    return gr.update(choices=models, value=models[0])
+
+                def on_model_change(selected_model, selected_make):
+                    if not selected_model or selected_model.startswith('('):
+                        return gr.update(choices=['(elige modelo primero)'], value='(elige modelo primero)')
+                    years = _fetch_years_for_make_model(selected_make, selected_model)
+                    if not years:
+                        return gr.update(choices=['(no se encontraron años)'], value='(no se encontraron años)')
+                    return gr.update(choices=years, value=years[0])
+
+                make_in.change(fn=on_make_change, inputs=[make_in], outputs=[model_in])
+                model_in.change(fn=on_model_change, inputs=[model_in, make_in], outputs=[year_in])
+
+                def fmt_vehicle_safety(resp: Dict[str, Any]) -> str:
+                    """Formatea la respuesta de check_vehicle_safety en Markdown en español."""
+                    def _stars(val):
+                        try:
+                            n = int(float(val))
+                            if n <= 0:
+                                return str(val)
+                            n = min(max(n, 0), 5)
+                            return '★' * n + f' ({n}/5)'
+                        except Exception:
+                            return str(val)
+
+                    if not isinstance(resp, dict):
+                        return 'Error: respuesta inesperada del proceso de verificación.'
+
+                    if not resp.get('success'):
+                        # Preferir mensajes en español
+                        err = resp.get('error') or resp.get('recalls_error') or 'desconocido'
+                        return f"Error al consultar seguridad: {err}"
+
+                    data = resp.get('data', {})
+                    make = data.get('make') or ''
+                    model = data.get('model') or ''
+                    year = data.get('year') or ''
+
+                    parts = [f"### Seguridad: {make} {model} ({year})"]
+                    parts.append(f"- Recalls totales: **{data.get('total_recalls',0)}**")
+
+                    recalls = data.get('recalls', []) or []
+                    if recalls:
+                        parts.append('\n**Lista de recalls (resumen):**')
+                        for r in recalls[:10]:
+                            cn = r.get('campaign_number') or r.get('CampaignNumber') or '-'
+                            comp = r.get('component') or r.get('Component') or '-'
+                            summ = (r.get('summary') or r.get('Summary') or r.get('description') or '')
+                            remedy = r.get('remedy') or r.get('Remedy') or '-'
+                            date = r.get('date') or r.get('ReportReceivedDate') or '-'
+                            # Traducciones cortas para etiquetas
+                            parts.append(f"- **Campaña:** {cn} — Fecha: {date}\n  - Componente: {comp}\n  - Resumen: {summ}\n  - Remedio: {remedy}")
+                    else:
+                        parts.append('- No se encontraron recalls para la combinación proporcionada.')
+
+                    sr = data.get('safety_ratings') or {}
+                    if sr:
+                        parts.append('\n**Calificaciones de seguridad (NHTSA):**')
+                        overall = sr.get('overall_rating') or sr.get('OverallRating')
+                        frontal = sr.get('frontal_crash') or sr.get('frontal') or sr.get('FrontalCrash')
+                        side = sr.get('side_crash') or sr.get('side') or sr.get('SideCrash')
+                        rollover = sr.get('rollover') or sr.get('rollover_rating') or sr.get('Rollover')
+                        parts.append(f"- Evaluación global: **{_stars(overall)}**")
+                        parts.append(f"- Frontal: {_stars(frontal)}, Lateral: {_stars(side)}, Volcamiento: {_stars(rollover)}")
+                    else:
+                        parts.append('- No hay calificaciones de seguridad disponibles.')
+
+                    recs = resp.get('recommendations') or []
+                    if recs:
+                        parts.append('\n**Recomendaciones:**')
+                        for r in recs:
+                            # si las recomendaciones vienen en inglés, intentar mapear términos comunes
+                            rr = str(r)
+                            rr = rr.replace('Recall', 'Recall').replace('inspect', 'inspeccionar')
+                            parts.append(f'- {rr}')
+
+                    # Errores parciales
+                    if resp.get('recalls_error'):
+                        parts.append(f"\n_Nota: hubo un problema consultando recalls: {resp.get('recalls_error')}_")
+
+                    return "\n\n".join(parts)
+
+                def vehicle_safety_ui(make, model, year, vin):
+                    """UI wrapper: normalize inputs and call the underlying tool."""
+                    try:
+                        mk = (make or '').strip()
+                        md = (model or '').strip()
+                        if not mk or not md:
+                            return 'Por favor especifica marca y modelo.'
+
+                        # Normalize common misspellings and casing
+                        common_map = {
+                            'Onda': 'Honda',
+                            'Toyta': 'Toyota',
+                            'Bmw': 'BMW',
+                            'Vw': 'Volkswagen',
+                            'Vokswagen': 'Volkswagen'
+                        }
+                        if mk in common_map:
+                            mk = common_map[mk]
+                        mk = ' '.join([p.capitalize() for p in mk.split()])
+                        md = ' '.join([p.capitalize() for p in md.split()])
+
+                        # Validate/normalize year
+                        try:
+                            yr = int(year) if year is not None and str(year).strip() != '' else None
+                        except Exception:
+                            return 'Año inválido. Indica un número entero (ej: 2015).'
+
+                        # Normalize VIN
+                        vin_n = None
+                        if vin:
+                            import re
+                            vin_n = re.sub(r'[^A-Za-z0-9]', '', str(vin)).upper() or None
+
+                        resp = check_vehicle_safety(mk, md, yr, vin_n)
+                        return fmt_vehicle_safety(resp)
+                    except Exception as e:
+                        return f'Error interno: {e}'
+
+                btns.click(fn=vehicle_safety_ui, inputs=[make_in, model_in, year_in, vin_in], outputs=outsafety)
 
     globals()['__convert_ui'] = convert_ui
     globals()['__fmt_weather_summary'] = fmt_weather_summary
