@@ -250,15 +250,35 @@ def build_demo_extended():
                         assess_res = { 'success': False, 'error': str(e) }
 
                     if assess_res.get('success'):
-                        rec = assess_res.get('recommendation', 'Cuidado')
+                        # Map recommendations to Spanish
+                        rec_en = assess_res.get('recommendation', '')
+                        rec_map = {'OK': 'Bien', 'Not ideal': 'No recomendable', 'Caution': 'Precaución'}
+                        rec = rec_map.get(rec_en, rec_en)
                         reasons = assess_res.get('reasons', []) or []
+
+                        # Translate some common reason patterns to Spanish
+                        def translate_reason(r: str) -> str:
+                            r = r.replace('Precipitation total', 'Precipitación total')
+                            r = r.replace('not ideal for testing', '— no ideal para probar')
+                            r = r.replace('High wind average', 'Viento medio alto')
+                            r = r.replace('— caution', '— precaución')
+                            r = r.replace('Low temperature', 'Baja temperatura')
+                            r = r.replace('High temperature', 'Alta temperatura')
+                            # simple unit translations
+                            r = r.replace('mm', 'mm')
+                            r = r.replace('km/h', 'km/h')
+                            return r
+
                         parts = [weather_md, '\n---\n', f'### Recomendación: **{rec}**']
                         if reasons:
-                            parts.append('\n'.join([f'- {r}' for r in reasons]))
+                            parts.append('\n'.join([f'- {translate_reason(r)}' for r in reasons]))
                         return "\n\n".join(parts)
                     else:
-                        hint = assess_res.get('error') or 'No disponible'
-                        return weather_md + f"\n\n**Recomendación:** No se pudo evaluar: {hint}"
+                        hint = (assess_res.get('error') or '').lower()
+                        # detect common archive/date errors and return a friendly Spanish message
+                        if any(k in hint for k in ('400', 'bad request', 'archive', 'out of range', 'date')):
+                            return weather_md + "\n\n**Recomendación:** No hay datos meteorológicos para la fecha seleccionada (posible fecha fuera de rango o no disponible en el archivo histórico). Prueba con otra fecha."
+                        return weather_md + f"\n\n**Recomendación:** No se pudo evaluar: {assess_res.get('error') or 'Error desconocido'}"
 
                 btnd.click(fn=_weather_by_province, inputs=[prov, date_d], outputs=outd)
 
