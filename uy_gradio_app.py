@@ -249,6 +249,7 @@ def build_demo_extended():
 
     with gr.Blocks(title='Asistente Coches - Herramientas') as demo:
         gr.Markdown("""
+        # Asistente para coches de segunda mano
         Usa las pestañas para consultar clima, conversiones de moneda, evaluación de condiciones para pruebas y preguntar al RAG.
         """)
 
@@ -479,7 +480,6 @@ def build_demo_extended():
                 model_in.change(fn=on_model_change, inputs=[model_in, make_in], outputs=[year_in])
 
                 def fmt_vehicle_safety(resp: Dict[str, Any]) -> str:
-
                     def _stars(val):
                         try:
                             n = int(float(val))
@@ -546,7 +546,6 @@ def build_demo_extended():
                     return "\n\n".join(parts)
 
                 def vehicle_safety_ui(make, model, year, vin):
-
                     try:
                         mk = (make or '').strip()
                         md = (model or '').strip()
