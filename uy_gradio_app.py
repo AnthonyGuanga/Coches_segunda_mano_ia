@@ -46,50 +46,14 @@ def build_demo_extended():
     convert_currency = getattr(tools, 'convert_currency', lambda *a, **k: {'success': False, 'error': 'convert_currency missing'})
     rag_query = getattr(tools, 'rag_query', lambda *a, **k: {'success': False, 'error': 'rag_query missing'})
     assess_testability = getattr(tools, 'assess_testability', lambda *a, **k: {'success': False, 'error': 'assess_testability missing'})
-    check_vehicle_safety = getattr(tools, 'check_vehicle_safety', None)
-    if check_vehicle_safety is None:
-
-        nbpath = Path(__file__).parent / 'uy_tools.ipynb'
-        if nbpath.exists():
-            nb = json.loads(nbpath.read_text())
-            code_cells = [c for c in nb.get('cells', []) if c.get('cell_type') == 'code']
-            target_src = None
-            for c in code_cells:
-                src = ''.join(c.get('source', []))
-                if 'def check_vehicle_safety' in src:
-                    target_src = src
-                    break
-            if target_src:
-
-                from typing import Dict, Any, List, Optional
-                safe_globals = {
-                    '__name__': 'uy_tools_loaded_partial',
-                    'httpx': httpx,
-                    'Dict': Dict,
-                    'Any': Any,
-                    'List': List,
-                    'Optional': Optional,
-                }
-
-                try:
-                    exec(compile(target_src, '<uy_tools_check_vehicle>', 'exec'), safe_globals)
-                except Exception:
-
-                    pass
-                if 'check_vehicle_safety' in safe_globals:
-                    check_vehicle_safety = safe_globals['check_vehicle_safety']
-
-                    try:
-                        setattr(tools, 'check_vehicle_safety', check_vehicle_safety)
-                    except Exception:
-                        pass
-
-    if not callable(check_vehicle_safety):
-
-        check_vehicle_safety = lambda *a, **k: {'success': False, 'error': 'check_vehicle_safety missing'}
+    check_vehicle_safety = getattr(tools, 'check_vehicle_safety', lambda *a, **k: {'success': False, 'error': 'check_vehicle_safety missing'})
 
     def weather_on_date_ui(lat: float, lon: float, date_str: str) -> Dict[str, Any]:
-        return get_weather_on_date(lat, lon, date_str)
+
+        try:
+            return get_weather_on_date(lat, lon, date_str)
+        except Exception as e:
+            return { 'success': False, 'error': str(e) }
 
     def _forecast_for_date(lat: float, lon: float, date_str: str) -> Dict[str, Any]:
         try:
@@ -180,42 +144,11 @@ def build_demo_extended():
             except Exception:
                 return 'Por favor indica un importe numérico válido.'
 
-            resp = convert_currency(amt, frm_code, to_code, date=None)
-
+            resp = convert_currency(amt, frm_code, to_code, date=date_str)
             if resp and resp.get('success') and resp.get('result') is not None:
                 return _format_currency_output(resp, amt, frm_code, to_code)
-
-            try:
-                url = 'https://api.exchangerate.host/convert'
-                params = {'from': frm_code, 'to': to_code, 'amount': amt}
-                r = httpx.get(url, params=params, timeout=6.0)
-                r.raise_for_status()
-                jd = r.json()
-                if jd.get('success') and 'result' in jd and jd.get('result') is not None:
-                    resp2 = {'success': True, 'query': {'amount': amt, 'from': frm_code, 'to': to_code}, 'result': jd.get('result')}
-                    return _format_currency_output(resp2, amt, frm_code, to_code)
-
-            except Exception:
-                pass
-            try:
-
-                url2 = 'https://api.frankfurter.app/latest'
-                params2 = {'amount': amt, 'from': frm_code, 'to': to_code}
-                r2 = httpx.get(url2, params=params2, timeout=6.0)
-                r2.raise_for_status()
-                jd2 = r2.json()
-                rates = jd2.get('rates') or {}
-                if to_code in rates and rates[to_code] is not None:
-
-                    resp2 = {'success': True, 'query': {'amount': amt, 'from': frm_code, 'to': to_code}, 'result': rates[to_code]}
-                    return _format_currency_output(resp2, amt, frm_code, to_code)
-            except Exception:
-                pass
-            except Exception:
-
-                pass
-
-            return f'No disponible: no se obtuvo tasa para {frm_code} → {to_code}'
+            err = resp.get('error') if isinstance(resp, dict) else 'No disponible'
+            return f'Conversión no disponible: {err}'
         except Exception as e:
             return f"Error en la conversión: {e}"
 
@@ -344,15 +277,24 @@ def build_demo_extended():
 
                     today = _date.today()
                     if d > today:
-
                         res = _forecast_for_date(lat, lon, date_str)
-
                         if res.get('success') and res.get('summary'):
-                            assess_res = _assess_summary_testability(res.get('summary'), res.get('date'))
+                            try:
+
+                                assess_res = assess_testability(date_str, lat, lon)
+                                if not assess_res.get('success'):
+                                    assess_res = _assess_summary_testability(res.get('summary'), res.get('date'))
+                            except Exception:
+                                assess_res = _assess_summary_testability(res.get('summary'), res.get('date'))
                         else:
                             assess_res = { 'success': False, 'error': res.get('error') }
                     else:
-                        res = weather_on_date_ui(lat, lon, date_str)
+
+                        res = None
+                        try:
+                            res = get_weather_on_date(lat, lon, date_str)
+                        except Exception as e:
+                            res = { 'success': False, 'error': str(e) }
                         assess_res = None
 
                     if not res or not res.get('success'):
@@ -546,6 +488,7 @@ def build_demo_extended():
                     return "\n\n".join(parts)
 
                 def vehicle_safety_ui(make, model, year, vin):
+
                     try:
                         mk = (make or '').strip()
                         md = (model or '').strip()
