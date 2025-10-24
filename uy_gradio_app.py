@@ -92,7 +92,6 @@ def build_demo_extended():
         return get_weather_on_date(lat, lon, date_str)
 
     def _forecast_for_date(lat: float, lon: float, date_str: str) -> Dict[str, Any]:
-        """Fetch forecast data for a future date using Open-Meteo forecast API and return same summary shape as archive."""
         try:
 
             d = None
@@ -134,7 +133,6 @@ def build_demo_extended():
             return { 'success': False, 'error': str(e) }
 
     def _assess_summary_testability(summary: Dict[str, Any], date_str: str) -> Dict[str, Any]:
-        """Evaluate testability from a weather summary dict (same heuristic as assess_testability)."""
         reasons = []
         score = 0
         prec = summary.get('precip_total_mm', 0)
@@ -251,7 +249,6 @@ def build_demo_extended():
 
     with gr.Blocks(title='Asistente Coches - Herramientas') as demo:
         gr.Markdown("""
-        # Asistente para coches de segunda mano
         Usa las pestañas para consultar clima, conversiones de moneda, evaluación de condiciones para pruebas y preguntar al RAG.
         """)
 
@@ -482,7 +479,7 @@ def build_demo_extended():
                 model_in.change(fn=on_model_change, inputs=[model_in, make_in], outputs=[year_in])
 
                 def fmt_vehicle_safety(resp: Dict[str, Any]) -> str:
-                    """Formatea la respuesta de check_vehicle_safety en Markdown en español."""
+
                     def _stars(val):
                         try:
                             n = int(float(val))
@@ -549,7 +546,7 @@ def build_demo_extended():
                     return "\n\n".join(parts)
 
                 def vehicle_safety_ui(make, model, year, vin):
-                    """UI wrapper: normalize inputs and call the underlying tool."""
+
                     try:
                         mk = (make or '').strip()
                         md = (model or '').strip()
