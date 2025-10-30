@@ -1,3 +1,101 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+myenv/
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.tox/
+*.coverage
+*.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+pytest_cache/
+
+# Jupyter Notebook checkpoints and outputs
+.ipynb_checkpoints
+**/.ipynb_checkpoints
+*.nbconvert.ipynb
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+python-version
+
+# pyre type checker
+.pyre/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.sublime-workspace
+*.sublime-project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temp files
+*.log
+logs/
+tmp/
+temp/
+
+# Data files, datasets, exports
+/datasets/
+*.csv
+*.jsonl
+*.parquet
+
+# ChromaDB persistence files
+/db_coches/
+db_coches/
+
+# Gradio/cache & web UI builds
+.gradio/
+
+# Notebook outputs or large artifacts
+outputs/
+artifacts/
+
+# Selenium webdriver binaries
+chromedriver*
+geckodriver*
+
+# Lock files
+.lock
 # Python-generated files
 __pycache__/
 *.py[oc]
