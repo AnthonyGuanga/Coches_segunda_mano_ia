@@ -1,7 +1,6 @@
-# file: answer_question.py
 import re
 import json
-from tools import convert_currency, get_weather_on_date, assess_testability, check_vehicle_safety
+from tools import get_weather_on_date, assess_testability, check_vehicle_safety
 from tools import tools_dict, tools_description, format_tool_output
 from rag_client import query as rag_query
 from google import genai
@@ -13,10 +12,8 @@ load_dotenv()
 if not os.getenv("GOOGLE_API_KEY"):
     raise ValueError("Necesitas GOOGLE_API_KEY")
 
-# Inicializar cliente Gemini
 client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
-# Diccionario de provincias con coordenadas
 provincias_coords = {
     "alava": (42.8514, -2.6720),
     "albacete": (38.9954, -1.8574),
@@ -87,11 +84,9 @@ def answer_question(user_question: str):
     if provincia_detected:
         latitude, longitude = provincias_coords[provincia_detected]
 
-    # Consultar RAG primero si es pregunta de coches
     rag_result = rag_query(uq)
     context_answer = rag_result.get("answer") if rag_result.get("success") else None
 
-    # Construir prompt para Gemini con instrucciones claras por tool
     prompt = f"""
 Eres un asistente experto en coches de segunda mano y en herramientas útiles.
 Dispones de estas funciones:
@@ -122,18 +117,15 @@ Contexto RAG: {context_answer or "No hay información relevante"}
     except Exception as e:
         return f"Error al procesar la pregunta: {e}"
 
-    # Parsear JSON de la respuesta
     try:
         m = re.search(r"\{.*\}", gemini_text, re.DOTALL)
         parsed = json.loads(m.group()) if m else {}
     except Exception:
         parsed = {}
 
-    # Ejecutar tool si corresponde
     if parsed.get("action") == "tool":
         name = parsed.get("tool_name")
         params = parsed.get("parameters", {})
-        # Añadir lat/lon si es necesario
         if name in ["get_weather_on_date", "assess_testability"] and latitude and longitude:
             params["latitude"] = latitude
             params["longitude"] = longitude
@@ -142,8 +134,6 @@ Contexto RAG: {context_answer or "No hay información relevante"}
             return format_tool_output(name, func(**params))
         return f"Función '{name}' no encontrada."
     elif parsed.get("action") == "response":
-        # Respuesta directa
         return parsed.get("response", context_answer or "No puedo responder eso.")
     else:
-        # Si Gemini no genera JSON, devolver RAG o texto de Gemini
         return context_answer or gemini_text

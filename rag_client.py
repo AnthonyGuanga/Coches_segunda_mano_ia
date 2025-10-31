@@ -84,4 +84,4 @@ Si no tienes información suficiente, respóndele de forma amable y sugiere que 
 
 
 # ✅ Para probar desde terminal:
-# python -c "import rag_client; print(rag_client.query('Quiero un coche de gasolina por menos de 17000 euros'))"
+# python3 -c "import rag_client; print(rag_client.query('Quiero un coche de gasolina por menos de 17000 euros'))"

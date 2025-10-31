@@ -1,50 +1,12 @@
-# file: tools.py
 from typing import Dict, Any, Optional
 from pathlib import Path
 import httpx
 import joblib
 
 __all__ = [
-    'convert_currency', 'get_weather_on_date', 'assess_testability', 'check_vehicle_safety',
+    'get_weather_on_date', 'assess_testability',
     'tools', 'tools_dict', 'tools_description', 'format_tool_output'
 ]
-
-# ----------------------
-# CARGA DEL MODELO DE TESTABILIDAD
-# ----------------------
-MODEL_PATH = Path(__file__).resolve().parent / 'models' / 'testability_model.joblib'
-_model = None
-_label_encoder = None
-if MODEL_PATH.exists():
-    try:
-        _loaded = joblib.load(MODEL_PATH)
-        if isinstance(_loaded, dict) and 'pipeline' in _loaded:
-            _model = _loaded['pipeline']
-            _label_encoder = _loaded.get('label_encoder')
-        else:
-            _model = _loaded
-    except Exception:
-        _model = None
-
-# ----------------------
-# FUNCIONES BASE
-# ----------------------
-def convert_currency(amount: float, frm: str, to: str, date: Optional[str] = None) -> Dict[str, Any]:
-    try:
-        url = 'https://api.exchangerate.host/convert'
-        params = {'from': frm, 'to': to, 'amount': amount}
-        if date:
-            params['date'] = date
-        r = httpx.get(url, params=params, timeout=8.0)
-        r.raise_for_status()
-        data = r.json()
-        if data.get('success'):
-            return {'success': True, 'result': data.get('result'), 'raw': data}
-        return {'success': False, 'error': 'No result', 'raw': data}
-    except Exception as e:
-        return {'success': False, 'error': str(e)}
-
-
 def get_weather_on_date(latitude: float, longitude: float, date_str: str) -> Dict[str, Any]:
     try:
         url = 'https://api.open-meteo.com/v1/forecast'
@@ -104,32 +66,18 @@ def assess_testability(day: str, latitude: float, longitude: float) -> Dict[str,
     from pandas import DataFrame
     w = get_weather_on_date(latitude, longitude, day)
     if not w.get('success'):
-        return {'success': False, 'error': 'Could not retrieve weather: ' + str(w.get('error'))}
+        return {
+            'success': False,
+            'error': 'No se pudo obtener el clima: ' + str(w.get('error'))
+        }
     summary = w.get('summary', {})
-    if _model is not None:
-        try:
-            X = DataFrame([{
-                'precip_total_mm': summary.get('precip_total_mm', 0) or 0,
-                'wind_avg_kmh': summary.get('wind_avg_kmh', 0) or 0,
-                'temp_min': summary.get('temp_min'),
-                'temp_max': summary.get('temp_max')
-            }])
-            pred = _model.predict(X)
-            if _label_encoder is not None:
-                try:
-                    lab = _label_encoder.inverse_transform(pred)
-                    rec = lab[0]
-                except Exception:
-                    rec = str(pred[0])
-            else:
-                rec = str(pred[0])
-            return {'success': True, 'recommendation': rec, 'reasons': [], 'score': None, 'summary': summary}
-        except Exception:
-            rb = _rule_based_recommendation(summary)
-            return {'success': True, **rb, 'summary': summary}
-    else:
-        rb = _rule_based_recommendation(summary)
-        return {'success': True, **rb, 'summary': summary}
+    rb = _rule_based_recommendation(summary)
+    return {
+        'success': True,
+        **rb,
+        'summary': summary
+    }
+
 
 
 def check_vehicle_safety(make: str, model: str, year: int, vin: Optional[str] = None) -> Dict[str, Any]:
@@ -190,17 +138,12 @@ def check_vehicle_safety(make: str, model: str, year: int, vin: Optional[str] = 
         recommendations.append('Solicitar documentación de reparaciones de recalls previos')
     if safety_ratings and safety_ratings.get('overall_rating'):
         recommendations.append('Considerar calificaciones de seguridad en la decisión de compra')
-
     out = {'success': True, 'data': vehicle_info, 'recommendations': recommendations}
     if recalls_error:
         out['recalls_error'] = recalls_error
     return out
 
-# ----------------------
-# DICCIONARIOS Y FORMATO
-# ----------------------
 tools_dict = {
-    "convert_currency": convert_currency,
     "get_weather_on_date": get_weather_on_date,
     "assess_testability": assess_testability,
     "check_vehicle_safety": check_vehicle_safety
@@ -208,11 +151,9 @@ tools_dict = {
 
 tools_description = """
 Funciones disponibles:
-
-1. convert_currency(amount, frm, to, date=None) — convierte monedas.
-2. get_weather_on_date(latitude, longitude, date_str) — clima histórico.
-3. assess_testability(day, latitude, longitude) — evalúa aptitud para prueba.
-4. check_vehicle_safety(make, model, year, vin=None) — recalls y seguridad.
+1. get_weather_on_date(latitude, longitude, date_str) — clima histórico.
+2. assess_testability(day, latitude, longitude) — evalúa aptitud para prueba.
+3. check_vehicle_safety(make, model, year, vin=None) — recalls y seguridad.
 """
 
 def format_tool_output(tool_name: str, result):
@@ -237,13 +178,41 @@ def format_tool_output(tool_name: str, result):
     if tool_name == "check_vehicle_safety":
         if result.get("success"):
             d = result.get("data", {})
-            recs = result.get("recommendations", [])
-            rec_text = "; ".join(recs)
-            return f"{d.get('make')} {d.get('model')} ({d.get('year')}): {rec_text or 'Sin recomendaciones'}"
-        return f"Error: {result.get('error')}"
-    return str(result)
+        recalls = d.get("recalls", [])
+        if recalls:
+            recall_texts = []
+            for r in recalls:
+                recall_texts.append(
+                    f"- Campaña: {r.get('campaign_number')}\n"
+                    f"  Componente: {r.get('component')}\n"
+                    f"  Resumen: {r.get('summary')}\n"
+                    f"  Consecuencia: {r.get('consequence')}\n"
+                    f"  Remedio: {r.get('remedy')}\n"
+                    f"  Fecha: {r.get('date')}\n"
+                )
+            recalls_str = "\n".join(recall_texts)
+        else:
+            recalls_str = "No se encontraron recalls registrados."
 
-# ----------------------
-# Lista de tools (para integración futura con Gemini)
-# ----------------------
+        safety = d.get("safety_ratings", {})
+        ratings_str = (
+            f"\nCalificaciones de seguridad:\n"
+            f"  General: {safety.get('overall_rating')}\n"
+            f"  Choque frontal: {safety.get('frontal_crash')}\n"
+            f"  Choque lateral: {safety.get('side_crash')}\n"
+            f"  Vuelco: {safety.get('rollover')}\n"
+        ) if safety else ""
+
+        recs = result.get("recommendations", [])
+        rec_text = "\nRecomendaciones:\n- " + "\n- ".join(recs) if recs else ""
+
+        return (
+            f"{d.get('make')} {d.get('model')} ({d.get('year')}):\n\n"
+            f"Recalls encontrados:\n{recalls_str}\n"
+            f"{ratings_str}"
+            f"{rec_text}"
+        )
+    return f"Error: {result.get('error')}"
+
+
 tools = list(tools_dict.values())
