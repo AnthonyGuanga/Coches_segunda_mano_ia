@@ -81,7 +81,6 @@ def assess_testability(day: str, latitude: float, longitude: float) -> Dict[str,
 
 
 def check_vehicle_safety(make: str, model: str, year: int, vin: Optional[str] = None) -> Dict[str, Any]:
-    # Mantener la implementación completa que ya tenías antes
     recalls, recalls_error, vin_info, safety_ratings = [], None, None, {}
     try:
         base_url = 'https://api.nhtsa.gov/recalls/recallsByVehicle'
