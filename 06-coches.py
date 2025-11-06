@@ -3,6 +3,10 @@
 # =====================================================
 
 
+#Flyer publicitario de un coche Audi A3 2020 gris metálico, 50.000 km, en excelente estado. 
+#Incluye texto en español con una oferta llamativa y un eslogan corto. 
+#Diseño moderno, fondo urbano y tipografía elegante.
+
 import torch
 import gradio as gr
 from diffusers import AutoPipelineForText2Image
