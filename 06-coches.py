@@ -16,12 +16,34 @@ print(f"✅ Usando dispositivo: {device}")
 
 # --- Modelo de texto (T5 español oficial del PlanTL) ---
 print("Cargando modelo de texto (PlanTL-GOB-ES/t5-base-spanish)...")
-text_gen = pipeline(
-    "text2text-generation",
-    model="PlanTL-GOB-ES/t5-base-spanish",
-    device=device_id
-)
-print("✅ Modelo de texto cargado correctamente.")
+# Intentamos cargar el modelo preferido; si falla (404 / privado), caemos a un modelo público pequeño.
+try:
+    text_gen = pipeline(
+        "text2text-generation",
+        model="PlanTL-GOB-ES/t5-base-spanish",
+        device=device_id
+    )
+    print("✅ Modelo de texto cargado correctamente: PlanTL-GOB-ES/t5-base-spanish")
+except Exception as e:
+    # No queremos interrumpir la ejecución por un modelo privado/no encontrado.
+    print()
+    print("⚠️ No se pudo cargar 'PlanTL-GOB-ES/t5-base-spanish'.")
+    print("  Motivo:", str(e).splitlines()[0])
+    print("  Esto suele ocurrir si el modelo es privado o si no has iniciado sesión en Hugging Face (hf auth login)")
+    print("  Se intentará un modelo público de fallback (google/flan-t5-small). Si quieres usar el modelo oficial, autentícate con 'huggingface-cli login' o proporciona un token.")
+    print()
+    try:
+        text_gen = pipeline(
+            "text2text-generation",
+            model="google/flan-t5-small",
+            device=device_id
+        )
+        print("✅ Modelo de texto cargado correctamente (fallback): google/flan-t5-small")
+    except Exception as e2:
+        print()
+        print("❌ Error al cargar el modelo de fallback:", e2)
+        print("Asegúrate de tener conexión a Internet y de que los paquetes 'transformers' y 'huggingface_hub' estén actualizados.")
+        raise
 
 # --- Modelo de imagen ---
 print("Cargando modelo de imagen (Stable Diffusion v1-5)...")

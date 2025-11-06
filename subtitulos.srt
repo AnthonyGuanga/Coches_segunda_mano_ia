@@ -1,0 +1,16 @@
+1
+00:00:00,000 --> 00:00:06,000
+Hola soy Antonio Logato. Quieres saber cuánto vale tu coche? Visita compramos tu coche.es.
+
+2
+00:00:06,000 --> 00:00:12,000
+Introduce los datos y recibe tu oferta rápidamente. Comuna para denvoxes.
+
+3
+00:00:12,000 --> 00:00:15,000
+Y en una sucursal lo vendes.
+
+4
+00:00:15,000 --> 00:00:20,000
+Yo te lo recomiendo. Consigue tu oferta ahora. Encompramos tu coche.es.
+
