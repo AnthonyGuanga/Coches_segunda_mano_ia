@@ -1,60 +1,89 @@
-# app.py
+# ============================================
+# 🚗 Generador de anuncios de coches en español (Colab ready)
+# ============================================
+
+
+import torch
 import gradio as gr
 from transformers import pipeline
 from diffusers import StableDiffusionPipeline, EulerDiscreteScheduler
-import torch
 
-# Detecta GPU automáticamente
+# --- Configuración del dispositivo ---
 device = "cuda" if torch.cuda.is_available() else "cpu"
 dtype = torch.float16 if device == "cuda" else torch.float32
+device_id = 0 if device == "cuda" else -1
+print(f"✅ Usando dispositivo: {device}")
 
-# 1️⃣ Generación de texto (Mistral-7B)
-text_gen = pipeline("text-generation", model="mistralai/Mistral-7B-Instruct-v0.2", device=0 if device == "cuda" else -1)
+# --- Modelo de texto (T5 español oficial del PlanTL) ---
+print("Cargando modelo de texto (PlanTL-GOB-ES/t5-base-spanish)...")
+text_gen = pipeline(
+    "text2text-generation",
+    model="PlanTL-GOB-ES/t5-base-spanish",
+    device=device_id
+)
+print("✅ Modelo de texto cargado correctamente.")
 
-
-# 2️⃣ Generación de imagen (Stable Diffusion v2-base)
-model_id = "stabilityai/stable-diffusion-2-base"
+# --- Modelo de imagen ---
+print("Cargando modelo de imagen (Stable Diffusion v1-5)...")
+model_id = "runwayml/stable-diffusion-v1-5"
 scheduler = EulerDiscreteScheduler.from_pretrained(model_id, subfolder="scheduler")
+
 image_gen = StableDiffusionPipeline.from_pretrained(
     model_id,
     scheduler=scheduler,
-    torch_dtype=dtype
+    torch_dtype=dtype,
+    safety_checker=None
 )
 image_gen.to(device)
+print("✅ Modelo de imagen cargado correctamente.")
 
-# 🔧 Lógica principal
+# --- Función principal ---
 def generar_anuncio_y_imagen(descripcion):
-    # Generar anuncio textual (mejor prompt)
+    # Prompt de texto
     prompt_text = (
-        f"Escribe un anuncio breve y convincente para vender un coche de segunda mano. "
-        f"Detalles: {descripcion}. "
-        f"El texto debe sonar natural, confiable y atractivo:\n\n"
+        f"Redacta un anuncio breve y convincente en español para vender el siguiente coche de segunda mano: "
+        f"{descripcion}. El texto debe ser natural, atractivo y confiable."
     )
-    texto_generado = text_gen(prompt_text, max_length=120, temperature=0.8, top_p=0.9, do_sample=True)[0]["generated_text"]
 
-    # Generar imagen del coche
-    prompt_img = f"fotografía realista de un coche {descripcion}, aparcado en la calle, fondo neutro, luz natural"
-    image = image_gen(prompt_img).images[0]
+    # Generar texto
+    resultado = text_gen(prompt_text, max_new_tokens=120)[0]["generated_text"].strip()
+    yield resultado, None
 
-    return texto_generado, image
+    # Prompt de imagen
+    prompt_img = (
+        f"fotografía realista de un coche {descripcion}, "
+        f"aparacado en una calle moderna, luz natural, fondo urbano, alta calidad, 4K"
+    )
+    negative_prompt = "borroso, deforme, mala calidad, caricatura, dibujo, texto, marca de agua"
 
+    # Generar imagen
+    image = image_gen(
+        prompt_img,
+        negative_prompt=negative_prompt,
+        num_inference_steps=35,
+        guidance_scale=7.5
+    ).images[0]
 
-# 🎨 Interfaz con Gradio
-demo = gr.Interface(
-    fn=generar_anuncio_y_imagen,
-    inputs=gr.Textbox(
-        lines=2,
-        placeholder="Ejemplo: Ford Focus 2017 gris diésel 100.000 km en buen estado",
-        label="Descripción del coche"
-    ),
-    outputs=[
-        gr.Textbox(label="Anuncio generado", lines=8, interactive=False),
-        gr.Image(label="Imagen del coche generado")
-    ],
-    title="🚗 Generador de anuncios de coches de segunda mano",
-    description="Escribe una descripción y genera un anuncio completo con imagen realista usando IA de Hugging Face."
-)
+    yield resultado, image
 
 
-if __name__ == "__main__":
-    demo.launch()
+# --- Interfaz con Gradio ---
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("## 🚗 Generador de anuncios de coches de segunda mano")
+
+    with gr.Row():
+        with gr.Column(scale=1):
+            inp_descripcion = gr.Textbox(
+                lines=3,
+                placeholder="Ejemplo: Mini Cooper Cabrio rojo 2019, 60.000 km, excelente estado",
+                label="Descripción del coche"
+            )
+            btn_generar = gr.Button("Generar Anuncio", variant="primary")
+
+        with gr.Column(scale=1):
+            out_texto = gr.Textbox(label="📝 Anuncio generado", lines=8, interactive=False)
+            out_imagen = gr.Image(label="🖼️ Imagen generada", interactive=False)
+
+    btn_generar.click(fn=generar_anuncio_y_imagen, inputs=inp_descripcion, outputs=[out_texto, out_imagen])
+
+demo.launch(share=True)
