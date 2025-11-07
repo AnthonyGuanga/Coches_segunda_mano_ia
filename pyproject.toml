@@ -30,4 +30,5 @@ dependencies = [
     "torch>=2.9.0",
     "accelerate>=1.11.0",
     "safetensors>=0.6.2",
+    "librosa>=0.11.0"
 ]
