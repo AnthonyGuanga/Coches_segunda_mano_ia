@@ -11,36 +11,33 @@ dependencies = [
     "python-dotenv>=1.1.0",
     "openpyxl>=3.1.5",
     "nest_asyncio>=1.6.0",
-
     # --- SCRAPING ---
     "beautifulsoup4>=4.12.0",
     "playwright>=1.40.0",
     "selenium>=4.16.0",
     "webdriver-manager>=4.0.1",
-
     # --- LANGCHAIN (CORE & GOOGLE) ---
     # Usamos versiones >=0.3 que es el estándar estable actual
     "langchain>=0.3.0",
     "langchain-community>=0.3.0",
     "langchain-google-genai>=2.0.0",
-    
     # --- LLMS (Soportando rangos flexibles) ---
     "openai>=1.50.0",
     "openai-agents>=0.0.19",
     # IMPORTANTE: Quitamos el '==' para evitar conflictos
     "google-genai>=1.0.0",
     "google-generativeai>=0.8.0",
-
     # --- VECTOR DB ---
-    "chromadb>=0.5.0", 
+    "chromadb>=0.5.0",
     "sentence-transformers>=3.0.0",
-
     # --- MULTIMEDIA / LOCAL AI ---
     "gradio>=4.0.0",
     "transformers>=4.40.0",
     "diffusers>=0.29.0",
-    "torch>=2.4.0", 
+    "torch>=2.4.0",
     "accelerate>=0.30.0",
     "safetensors>=0.4.0",
     "librosa>=0.10.0",
+    "pyautogen[all]>=0.10.0",
+    "langchain-huggingface>=0.3.1",
 ]
