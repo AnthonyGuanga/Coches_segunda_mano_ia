@@ -1,198 +1,219 @@
+# =========================
+# Autofesa — AutoGen + FAISS + Gradio (Versión Optimizada)
+# =========================
+
+# ---- 1. Instalaciones ----
+# Usamos faiss-cpu para asegurar compatibilidad en Colab estándar
+!pip install -q faiss-cpu langchain-huggingface langchain-community autogen gradio
+
 import os
-import re
+import shutil
 import pandas as pd
-from typing import Optional
-from dotenv import load_dotenv
+import nest_asyncio
+import autogen
+from typing import Annotated, Optional, List
+from google.colab import userdata
 
-# === LangChain ===
-from langchain_community.vectorstores import Chroma
+# Componentes de LangChain / Vector Store
+from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
-from langchain.chains.retrieval_qa.base import RetrievalQA
-from langchain_core.prompts import PromptTemplate
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_google_genai import ChatGoogleGenerativeAI
 
-# === UI ===
+# UI
 import gradio as gr
 
-load_dotenv()
+# Parche necesario para que AutoGen funcione dentro de Jupyter/Colab
+nest_asyncio.apply()
 
-# =====================================================================================
-#                               CONFIGURACIÓN GLOBAL
-# =====================================================================================
+# =========================
+# 2. Configuración
+# =========================
+BASE_DIR = "/content"
+CSV_FILENAME = "autofesa_completo_20251202_0932.csv" 
+CSV_PATH = os.path.join(BASE_DIR, CSV_FILENAME)
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CHROMA_DIR = os.path.join(BASE_DIR, "chroma_db")
-COLLECTION_NAME = "inventario_coches_autofesa"
-CSV_PATH = os.path.join(BASE_DIR, "autofesa_completo_20251127_1041.csv")
-
-GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
+# Gestión robusta de la API Key
+try:
+    GOOGLE_KEY = userdata.get('GOOGLE_API_KEY')
+except Exception:
+    GOOGLE_KEY = None
 
 if not GOOGLE_KEY:
-    raise ValueError("❌ GOOGLE_API_KEY no está definido en .env")
+    GOOGLE_KEY = input("🔑 Introduce tu GOOGLE_API_KEY: ").strip()
 
+if not GOOGLE_KEY:
+    raise ValueError("❌ Error: Se necesita una API Key válida.")
 
-# =====================================================================================
-#                                   CARGA CSV
-# =====================================================================================
+# =========================
+# 3. Carga y Vectorización
+# =========================
 
-def crear_documentos_desde_csv(csv_path: str):
-    print(f"Loading CSV: {csv_path}")
-
-    df = pd.read_csv(csv_path)
+def cargar_datos():
+    """Carga el CSV o crea datos falsos si no existe."""
+    if not os.path.exists(CSV_PATH):
+        print(f"⚠️ Archivo {CSV_FILENAME} no encontrado. Generando datos de prueba...")
+        return [
+            Document(page_content="BMW Serie 3 320d. Color Blanco.", metadata={"Modelo": "BMW Serie 3", "Precio": 20000, "Km": 50000, "Link": "http://auto.com/1"}),
+            Document(page_content="Audi A4 TDI. Color Negro.", metadata={"Modelo": "Audi A4", "Precio": 15000, "Km": 80000, "Link": "http://auto.com/2"}),
+            Document(page_content="Ford Fiesta EcoBoost. Pequeño.", metadata={"Modelo": "Ford Fiesta", "Precio": 8000, "Km": 30000, "Link": "http://auto.com/3"})
+        ]
+    
+    df = pd.read_csv(CSV_PATH)
     docs = []
-
+    # Aseguramos columnas numéricas para evitar errores de filtrado después
+    df['Precio'] = pd.to_numeric(df['Precio'], errors='coerce').fillna(0).astype(int)
+    df['Km'] = pd.to_numeric(df['Km'], errors='coerce').fillna(0).astype(int)
+    
     for _, row in df.iterrows():
-        text = (
-            f"Modelo: {row['Modelo']}. Precio: {row['Precio']}€. Año: {row['Año']}. "
-            f"Kilometraje: {row['Km']} km. Combustible: {row['Combustible']}. "
-            f"Link: {row['Link']}"
-        )
-
-        docs.append(
-            Document(
-                page_content=text,
-                metadata=dict(
-                    Modelo=row["Modelo"],
-                    Precio=row["Precio"],
-                    Km=row["Km"],
-                    Año=row["Año"],
-                    Link=row["Link"],
-                    Combustible=row["Combustible"],
-                ),
-            )
-        )
-
-    print(f"Created {len(docs)} documents.")
+        # Creamos un texto rico para la búsqueda semántica
+        contenido = f"Coche: {row['Modelo']}. {row['Combustible']}. Año {row['Año']}."
+        # Guardamos los datos exactos en metadatos para filtrado preciso
+        meta = {
+            "Modelo": row['Modelo'],
+            "Precio": row['Precio'],
+            "Km": row['Km'],
+            "Link": row['Link']
+        }
+        docs.append(Document(page_content=contenido, metadata=meta))
+    
+    print(f"✅ {len(docs)} coches cargados y procesados.")
     return docs
 
+print("⏳ Generando Embeddings y Base de Datos...")
+docs = cargar_datos()
+embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+vectorstore = FAISS.from_documents(docs, embeddings)
+print("✅ Sistema listo.")
 
-# =====================================================================================
-#                                 FILTRADO ESTRICTO
-# =====================================================================================
+# =========================
+# 4. La Herramienta (The Tool)
+# =========================
 
-def filtrar_coches_por_parametros(raw: str, max_precio=None, max_km=None):
-    if not raw or "No se encontraron" in raw:
-        return raw
-
-    coches = [c.strip() for c in raw.split(";") if c.strip()]
-
-    regex = re.compile(
-        r"\[(\d+)\s*€\].*?\((?:.*?)\s*(\d+)\s*km",
-        flags=re.IGNORECASE,
-    )
+# MEJORA: Usamos Annotated y tipos nativos (int) para que el LLM entienda mejor
+def tool_buscar_inventario(
+    consulta: Annotated[str, "Descripción del coche que busca el usuario (ej: 'BMW deportivo')"],
+    precio_max: Annotated[Optional[int], "Presupuesto máximo en euros. Usa None si no se especifica."] = None,
+    km_max: Annotated[Optional[int], "Kilometraje máximo. Usa None si no se especifica."] = None
+) -> str:
+    """
+    Busca coches semánticamente y luego filtra estrictamente por precio y km usando metadatos.
+    """
+    print(f"🔍 BUSCANDO: '{consulta}' | Max €: {precio_max} | Max Km: {km_max}")
+    
+    # 1. Búsqueda Semántica (Traemos los 20 más relevantes)
+    results = vectorstore.similarity_search(consulta, k=20)
+    
+    if not results:
+        return "No se encontraron resultados semánticos."
 
     filtrados = []
-    for c in coches:
-        match = regex.search(c)
-        if not match:
-            continue
-
-        precio = int(match.group(1))
-        km = int(match.group(2))
-
-        if (max_precio is None or precio <= max_precio) and (
-            max_km is None or km <= max_km
-        ):
-            filtrados.append(c)
-
+    
+    # 2. Filtrado Lógico (Usando Metadatos, NO Regex)
+    for doc in results:
+        meta = doc.metadata
+        precio_coche = meta.get("Precio", 9999999)
+        km_coche = meta.get("Km", 9999999)
+        
+        # Lógica de filtro: Si el usuario puso límite, comprobamos. Si no, pasa.
+        cumple_precio = (precio_max is None) or (precio_coche <= precio_max)
+        cumple_km = (km_max is None) or (km_coche <= km_max)
+        
+        if cumple_precio and cumple_km:
+            info = f"- {meta['Modelo']} | {precio_coche}€ | {km_coche}km | [Ver]({meta['Link']})"
+            filtrados.append(info)
+            
     if not filtrados:
-        return "No se encontraron coches que cumplan esos criterios de filtrado estricto."
+        return f"Encontré coches tipo '{consulta}', pero ninguno por debajo de {precio_max}€ o {km_max}km."
 
-    return "; ".join(filtrados)
+    # Devolvemos solo los top 5 para no saturar al LLM
+    return "Coches encontrados:\n" + "\n".join(filtrados[:5])
 
+# =========================
+# 5. Configuración Agentes AutoGen (CORREGIDO)
+# =========================
 
-# =====================================================================================
-#                                 CONFIGURAR RAG
-# =====================================================================================
+llm_config = {
+    "config_list": [{
+        "model": "gemini-2.0-flash",
+        "api_key": GOOGLE_KEY,
+        "api_type": "google"
+    }],
+    "temperature": 0
+}
 
-docs = crear_documentos_desde_csv(CSV_PATH)
-
-embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-vectorstore = Chroma.from_documents(
-    documents=docs,
-    embedding=embeddings,
-    persist_directory=CHROMA_DIR,
-    collection_name=COLLECTION_NAME,
+# 1. EL PROXY (Tu ordenador)
+# AUMENTAMOS max_consecutive_auto_reply a 5 para que le de tiempo a:
+# Pensar -> Llamar Herramienta -> Ejecutar Herramienta -> Leer Resultado -> Responder
+user_proxy = autogen.UserProxyAgent(
+    name="user_proxy",
+    human_input_mode="NEVER",
+    max_consecutive_auto_reply=5,  # <--- CAMBIO IMPORTANTE (Antes era 1)
+    code_execution_config={"use_docker": False},
+    # Criterio de parada: Si el agente dice "TERMINATE", paramos.
+    is_termination_msg=lambda x: x.get("content", "") and "TERMINATE" in x.get("content", "")
 )
 
-retriever = vectorstore.as_retriever(search_kwargs={"k": 5})
-
-prompt = PromptTemplate(
-    template="""
-Eres un buscador experto del inventario Autofesa.
-
-Usa SOLO el contexto para responder.
-Devuelve resultados usando este formato:
-
-Modelo [Precio€] (Combustible, Km, Año); Modelo2 [Precio€] (...)
-
-Si no encuentras coincidencias, responde:
-"No se encontraron coches que cumplan esos criterios en el inventario."
-
-Pregunta: {question}
-Contexto: {context}
-""",
-    input_variables=["context", "question"],
+# 2. EL AGENTE (Vendedor)
+# Le decimos explícitamente que termine la conversación con TERMINATE cuando acabe.
+sales_agent = autogen.AssistantAgent(
+    name="vendedor",
+    llm_config=llm_config,
+    system_message="""Eres un vendedor experto de Autofesa.
+    
+    TU MISIÓN:
+    1. Recibes una petición del usuario.
+    2. SIEMPRE utiliza la herramienta 'buscar_inventario' inmediatamente. No hagas preguntas antes de buscar.
+    3. Si la herramienta devuelve datos, resume los 3-5 mejores coches de forma atractiva (Modelo, Precio, Link).
+    4. Si la herramienta no devuelve nada, dilo y sugiere cambiar filtros.
+    5. AL FINAL DE TU RESPUESTA FINAL, escribe la palabra: TERMINATE
+    """
 )
 
-llm = ChatGoogleGenerativeAI(
-    model="gemini-2.0-flash",
-    google_api_key=GOOGLE_KEY,
-    temperature=0,
+# Registramos la función
+autogen.register_function(
+    tool_buscar_inventario,
+    caller=sales_agent,
+    executor=user_proxy,
+    name="buscar_inventario",
+    description="Busca en el inventario de coches."
 )
 
-rag_chain = RetrievalQA.from_chain_type(
-    llm=llm,
-    chain_type="stuff",
-    retriever=retriever,
-    return_source_documents=False,
-    chain_type_kwargs={"prompt": prompt},
-)
+# =========================
+# 6. Interfaz Chat (Gradio)
+# =========================
 
+def chat_logic(mensaje, history):
+    # Preparamos el historial visual para Gradio
+    if history is None: history = []
+    
+    # AutoGen necesita un inicio claro.
+    # Nota: initiate_chat reinicia el contexto del agente en cada turno en esta config simple.
+    # Para mantener contexto real, se requiere gestionar el estado del agente (más complejo).
+    try:
+        chat_res = user_proxy.initiate_chat(
+            sales_agent,
+            message=mensaje,
+            summary_method="last_msg"
+        )
+        respuesta = chat_res.summary
+    except Exception as e:
+        respuesta = f"Error: {str(e)}"
 
-# =====================================================================================
-#                         FUNCIÓN PRINCIPAL QUE USA RAG
-# =====================================================================================
+    history.append({"role": "user", "content": mensaje})
+    history.append({"role": "assistant", "content": respuesta})
+    
+    return "", history # Limpia el input box y actualiza chat
 
-def buscar_coches_rag(query: str, max_precio=None, max_km=None):
-    result = rag_chain.invoke({"query": query})
-    raw = result["result"].strip()
+with gr.Blocks(theme=gr.themes.Soft()) as demo:
+    gr.Markdown("# 🤖 Autofesa AI Assistant")
+    
+    chatbot = gr.Chatbot(type="messages", height=450)
+    msg = gr.Textbox(label="Escribe tu consulta...", placeholder="Busco un coche barato...")
+    clear = gr.Button("Limpiar Chat")
 
-    return filtrar_coches_por_parametros(raw, max_precio, max_km)
+    msg.submit(chat_logic, [msg, chatbot], [msg, chatbot])
+    
+    # Botón limpiar
+    clear.click(lambda: None, None, chatbot, queue=False)
 
-
-# =====================================================================================
-#                                   GRADIO
-# =====================================================================================
-
-def consultar(pregunta, max_precio, max_km):
-    max_precio = int(max_precio) if max_precio else None
-    max_km = int(max_km) if max_km else None
-
-    return buscar_coches_rag(pregunta, max_precio, max_km)
-
-
-with gr.Blocks(title="RAG Autofesa") as demo:
-    gr.Markdown("# 🚗 Buscador Inteligente Autofesa (RAG + Gemini)")
-
-    pregunta = gr.Textbox(label="Consulta", placeholder="coches BMW diesel…")
-    max_precio = gr.Number(label="Precio máximo", value=None)
-    max_km = gr.Number(label="Kilometraje máximo", value=None)
-
-    out = gr.Textbox(label="Resultado", lines=6)
-
-    gr.Button("Buscar").click(
-        consultar,
-        inputs=[pregunta, max_precio, max_km],
-        outputs=out,
-    )
-
-
-# =====================================================================================
-#                                       MAIN
-# =====================================================================================
-
-if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860, share=False)
+demo.launch(server_name="0.0.0.0", share=True, debug=True)
