@@ -318,4 +318,4 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     msg.submit(chat_logic, [msg, chatbot], [msg, chatbot])
 
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", share=False)
+    demo.launch(server_name="127.0.0.1", share=False)
