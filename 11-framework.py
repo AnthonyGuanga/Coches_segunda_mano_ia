@@ -1,15 +1,17 @@
 import os
+import re
 import pandas as pd
 import gradio as gr
 from typing import List, Optional
 from dotenv import load_dotenv
 
-# ---- IMPORTS LANGCHAIN (Base de Datos) ----
+# ---- IMPORTS LANGCHAIN ----
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_core.documents import Document as LangchainDocument
+from langchain_community.document_loaders import WebBaseLoader # <--- NUEVO IMPORT
 
-# ---- IMPORTS HAYSTACK (Orquestador Multi-Agente) ----
+# ---- IMPORTS HAYSTACK ----
 from haystack import Pipeline, component, Document
 from haystack.components.builders import PromptBuilder
 from haystack_integrations.components.generators.google_ai import GoogleAIGeminiGenerator
@@ -27,208 +29,248 @@ if not GOOGLE_KEY:
     os.environ["GOOGLE_API_KEY"] = GOOGLE_KEY
 
 # =========================
-# 2. LÓGICA DE DATOS (LangChain + FAISS)
+# 2. CARGA DE DATOS (Igual que antes)
 # =========================
 def cargar_datos_langchain():
     if not os.path.exists(CSV_PATH):
-        # Datos Dummy si no hay CSV
         return [
-            LangchainDocument(page_content="BMW Serie 3. Diesel.", metadata={"Modelo": "BMW Serie 3", "Precio": 20000, "Km": 50000, "Link": "http://auto.com/1"}),
-            LangchainDocument(page_content="Audi A4. Gasolina.", metadata={"Modelo": "Audi A4", "Precio": 15000, "Km": 80000, "Link": "http://auto.com/2"}),
+            LangchainDocument(page_content="BMW Serie 3 320d. Diesel. 190cv.", metadata={"Modelo": "BMW Serie 3", "Precio": 20000, "Km": 50000, "Link": "http://auto.com/1"}),
+            LangchainDocument(page_content="Audi A4 TDI. Diesel. 150cv.", metadata={"Modelo": "Audi A4", "Precio": 15000, "Km": 80000, "Link": "http://auto.com/2"}),
         ]
-    
     df = pd.read_csv(CSV_PATH)
     docs = []
-    # Conversión numérica segura
     df['Precio'] = pd.to_numeric(df['Precio'], errors='coerce').fillna(0).astype(int)
     df['Km'] = pd.to_numeric(df['Km'], errors='coerce').fillna(0).astype(int)
-
     for _, row in df.iterrows():
         contenido = f"{row['Modelo']}. {row['Combustible']}."
         meta = {"Modelo": row['Modelo'], "Precio": row['Precio'], "Km": row['Km'], "Link": row['Link']}
         docs.append(LangchainDocument(page_content=contenido, metadata=meta))
     return docs
 
-print("⏳ Agente 1 (Sabueso): Indexando inventario...")
+print("⏳ Indexando inventario...")
 lc_docs = cargar_datos_langchain()
 embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 vectorstore = FAISS.from_documents(lc_docs, embeddings)
-print("✅ Agente 1 listo.")
+print("✅ Base de datos lista.")
 
 # =========================
-# 3. COMPONENTES DEL SISTEMA MULTI-AGENTE
+# 3. COMPONENTES DEL SISTEMA
 # =========================
 
-# --- AGENTE 1: EL SABUESO (Retrieval Tool) ---
+# --- AGENTE 1: EL SABUESO (Busca en nuestra DB) ---
 @component
 class InventoryAgent:
-    """Busca y filtra datos técnicos estrictos."""
-    
     @component.output_types(documents=List[Document])
-    def run(self, query: str, precio_max: Optional[int] = None, km_max: Optional[int] = None):
-        print(f"🐶 [Agente Sabueso] Buscando: {query} (Max €{precio_max})")
-        results = vectorstore.similarity_search(query, k=15)
+    def run(self, query: str):
+        print(f"🐶 [Sabueso] Buscando coches similares a: '{query[:50]}...'")
+        results = vectorstore.similarity_search(query, k=4)
         haystack_docs = []
-        
         for doc in results:
             meta = doc.metadata
-            p = meta.get("Precio", 999999)
-            k = meta.get("Km", 999999)
-            
-            if (precio_max is None or p <= precio_max) and (km_max is None or k <= km_max):
-                # Formato claro para que los siguientes agentes lean bien
-                txt = f"VEHÍCULO: {meta['Modelo']} | PRECIO: {p}€ | KM: {k} | REF: {meta['Link']}"
-                haystack_docs.append(Document(content=txt, meta=meta))
-        
-        return {"documents": haystack_docs[:4]} # Solo los 4 mejores
+            txt = f"NUESTRO COCHE: {meta['Modelo']} | {meta['Precio']}€ | {meta['Km']}km"
+            haystack_docs.append(Document(content=txt, meta=meta))
+        return {"documents": haystack_docs}
 
-# --- AGENTE 2: EL VENDEDOR (Writer) ---
+# --- NUEVO COMPONENTE: EL SCRAPER (Web Loader) ---
+@component
+class WebScraperComponent:
+    """Usa LangChain WebBaseLoader para leer una URL externa."""
+    @component.output_types(scraped_content=str, status=str)
+    def run(self, url: str):
+        print(f"🌐 [Scraper] Descargando info de: {url}")
+        try:
+            loader = WebBaseLoader(url)
+            # Cargamos y limitamos caracteres para no saturar al LLM
+            docs = loader.load()
+            content = docs[0].page_content[:2000] # Solo los primeros 2000 caracteres
+            # Limpieza básica de saltos de línea
+            content = " ".join(content.split())
+            return {"scraped_content": content, "status": "ok"}
+        except Exception as e:
+            return {"scraped_content": "", "status": f"Error: {str(e)}"}
+
+# =========================
+# 4. DEFINICIÓN DE AGENTES LLM
+# =========================
+
+# --- AGENTE 2: EL VENDEDOR (Modo Normal) ---
 template_vendedor = """
-Rol: Eres "El Vendedor", un experto comercial de coches.
-Tarea: Escribe un borrador de respuesta para el cliente basado en los coches encontrados.
-Tono: Entusiasta, persuasivo y enfocado en beneficios.
-
-Coches disponibles (Datos Reales):
+Rol: Eres un vendedor de coches entusiasta.
+Inventario:
 {% for doc in documents %}
   {{ doc.content }}
 {% endfor %}
+Cliente: {{ query }}
+Escribe una propuesta corta y persuasiva.
+"""
 
-Cliente busca: {{ query }}
+# --- AGENTE 4 (NUEVO): EL ANALISTA (Modo Comparación) ---
+# Este agente recibe el texto de la web externa + nuestros coches
+template_analista = """
+Rol: Eres un Analista de Mercado imparcial.
+Tarea: Comparar el coche externo que está mirando el cliente con nuestras opciones.
+
+COCHE EXTERNO (Encontrado en la web):
+{{ external_data }}
+
+NUESTRO INVENTARIO (Alternativas):
+{% for doc in documents %}
+  {{ doc.content }}
+{% endfor %}
 
 Instrucciones:
-1. Si no hay coches, discúlpate.
-2. Si hay coches, elige el mejor y "véndelo" con emoción. Menciona los otros brevemente.
-3. NO inventes datos. Usa solo la lista de arriba.
+1. Analiza las caracteristicas del coche externo.
+2. Crea una TABLA COMPARATIVA comparándolo con nuestro mejor candidato.
+3. Argumenta por qué nuestra opción es mejor (precio, garantía, confianza) o si la suya es buena.
+4. Sé profesional y analítico.
 
-Borrador del Vendedor:
+Análisis del experto:
 """
 
-# --- AGENTE 3: EL GERENTE (Critic/Manager) ---
+# --- AGENTE 3: EL GERENTE (Validador Común) ---
 template_gerente = """
-Rol: Eres "El Gerente", supervisor de calidad de Autofesa.
-Tarea: Revisar y pulir el borrador del Vendedor.
+Rol: Gerente de Calidad.
+Tarea: Revisar el texto generado y darle formato final al cliente.
 
-Contexto Original (Datos Técnicos):
-{% for doc in documents %}
-  {{ doc.content }}
-{% endfor %}
+Texto Generado: {{ draft_text }}
 
-Borrador del Vendedor:
-{{ sales_draft[0] }}
-
-Instrucciones de Revisión:
-1. VERIFICACIÓN DE HECHOS: Asegúrate de que el precio y modelo coincidan exactamente con el Contexto Original. Si el vendedor inventó algo, corrígelo.
-2. FORMATO: Organiza la respuesta limpia, usa viñetas para los coches.
-3. CIERRE: Asegúrate de que termine con una llamada a la acción clara (ej: "¿Te agendo una cita?").
-4. Elimina cualquier texto interno como "Aquí tienes el borrador". Solo entrega el mensaje final para el cliente.
-
-Respuesta Final Aprobada:
+Tu respuesta final al cliente (limpia y educada):
 """
 
 # =========================
-# 4. CONSTRUCCIÓN DEL WORKFLOW (PIPELINE)
+# 5. PIPELINES (FLUJOS DE TRABAJO)
 # =========================
 
-# Instanciamos componentes
-agente_sabueso = InventoryAgent()
+print("⚙️ Configurando Agentes...")
 
-# Prompt + LLM para Agente Vendedor
-prompt_vendedor = PromptBuilder(template=template_vendedor)
-llm_vendedor = GoogleAIGeminiGenerator(model="gemini-2.0-flash")
+# --- PIPELINE A: VENTA NORMAL ---
+pipe_venta = Pipeline()
 
-# Prompt + LLM para Agente Gerente
-prompt_gerente = PromptBuilder(template=template_gerente)
-llm_gerente = GoogleAIGeminiGenerator(model="gemini-2.0-flash")
+# Instanciamos los componentes DENTRO del add_component para que sean únicos
+pipe_venta.add_component("sabueso", InventoryAgent()) 
+pipe_venta.add_component("prompt_vendedor", PromptBuilder(template=template_vendedor))
+pipe_venta.add_component("llm_vendedor", GoogleAIGeminiGenerator(model="gemini-2.0-flash")) # Instancia única 1
+pipe_venta.add_component("prompt_gerente", PromptBuilder(template=template_gerente))
+pipe_venta.add_component("llm_gerente", GoogleAIGeminiGenerator(model="gemini-2.0-flash"))  # Instancia única 2
 
-# Creamos el Pipeline Lineal
-pipeline = Pipeline()
+# Conexiones Venta
+pipe_venta.connect("sabueso", "prompt_vendedor")
+pipe_venta.connect("prompt_vendedor", "llm_vendedor")
+pipe_venta.connect("llm_vendedor.replies", "prompt_gerente.draft_text")
+pipe_venta.connect("prompt_gerente", "llm_gerente")
 
-# Fase 1: Búsqueda
-pipeline.add_component("sabueso", agente_sabueso)
 
-# Fase 2: Redacción (Vendedor)
-pipeline.add_component("prompt_vendedor", prompt_vendedor)
-pipeline.add_component("llm_vendedor", llm_vendedor)
+# --- PIPELINE B: COMPARADOR (NUEVO) ---
+pipe_comparador = Pipeline()
 
-# Fase 3: Validación (Gerente)
-pipeline.add_component("prompt_gerente", prompt_gerente)
-pipeline.add_component("llm_gerente", llm_gerente)
+pipe_comparador.add_component("scraper", WebScraperComponent())
+# IMPORTANTE: Creamos un NUEVO InventoryAgent para este pipeline (no se pueden compartir)
+pipe_comparador.add_component("sabueso", InventoryAgent()) 
+pipe_comparador.add_component("prompt_analista", PromptBuilder(template=template_analista))
+pipe_comparador.add_component("llm_analista", GoogleAIGeminiGenerator(model="gemini-2.0-flash")) # Instancia única 3
+pipe_comparador.add_component("prompt_gerente", PromptBuilder(template=template_gerente))
+pipe_comparador.add_component("llm_gerente", GoogleAIGeminiGenerator(model="gemini-2.0-flash")) # Instancia única 4
 
-# --- CONEXIONES ---
-# 1. Sabueso -> Prompt Vendedor (Pasa los documentos)
-pipeline.connect("sabueso.documents", "prompt_vendedor.documents")
-# 2. Prompt Vendedor -> LLM Vendedor
-pipeline.connect("prompt_vendedor", "llm_vendedor")
+# Conexiones Comparador
+# 1. El texto scrapeado va al Sabueso (para buscar coches similares) y al Analista
+pipe_comparador.connect("scraper.scraped_content", "sabueso.query")
+pipe_comparador.connect("scraper.scraped_content", "prompt_analista.external_data")
 
-# 3. CRÍTICO: Necesita ver los documentos originales Y el borrador del vendedor
-pipeline.connect("sabueso.documents", "prompt_gerente.documents") # Para chequear la verdad
-pipeline.connect("llm_vendedor.replies", "prompt_gerente.sales_draft") # Para corregir el texto
+# 2. Los coches encontrados por el sabueso van al analista
+pipe_comparador.connect("sabueso", "prompt_analista")
 
-# 4. Prompt Gerente -> LLM Gerente (Salida Final)
-pipeline.connect("prompt_gerente", "llm_gerente")
+# 3. Flujo LLM
+pipe_comparador.connect("prompt_analista", "llm_analista")
+pipe_comparador.connect("llm_analista.replies", "prompt_gerente.draft_text")
+pipe_comparador.connect("prompt_gerente", "llm_gerente")
 
-print("✅ Sistema Multi-Agente (Sabueso -> Vendedor -> Gerente) Listo.")
+print("✅ Pipelines listos: [A: Venta Normal] y [B: Comparador Web]")
 
 # =========================
-# 5. INTERFAZ
+# 6. LÓGICA DE CONTROL
 # =========================
 
-def procesar_consulta(mensaje, history):
-    # 1. Extracción de filtros
-    import re
-    precio, km = None, None
-    m_p = re.search(r'(\d+)\s*(?:€|euros)', mensaje.lower())
-    m_k = re.search(r'(\d+)\s*(?:km)', mensaje.lower())
-    if m_p: precio = int(m_p.group(1))
-    if m_k: km = int(m_k.group(1))
+def detectar_url(texto):
+    # Regex simple para encontrar URLs
+    url_pattern = re.compile(r'(https?://\S+)')
+    match = url_pattern.search(texto)
+    return match.group(0) if match else None
 
-    # 2. Ejecución del Workflow
-    # AQUI ESTA LA CORRECCION CLAVE: 'include_outputs_from'
-    resultado = pipeline.run(
-        {
-            "sabueso": {"query": mensaje, "precio_max": precio, "km_max": km},
-            "prompt_vendedor": {"query": mensaje}, 
-        },
-        include_outputs_from={"llm_vendedor"}  # <--- ESTO SOLUCIONA TU ERROR
-    )
-
-    # 3. EXTRAEMOS LA INFORMACIÓN INTERNA
-    # Ahora sí existirá 'llm_vendedor' en el diccionario
-    borrador_vendedor = resultado["llm_vendedor"]["replies"][0]
+def chat_logic(mensaje, history):
+    url_encontrada = detectar_url(mensaje)
     
-    # La salida final siempre viene por defecto
-    respuesta_final = resultado["llm_gerente"]["replies"][0]
+    # --- MODO COMPARADOR (Si hay URL) ---
+    if url_encontrada:
+        print(f"\n🚨 URL DETECTADA: Activando Agente Analista ({url_encontrada})")
+        res = pipe_comparador.run(
+            {
+                "scraper": {"url": url_encontrada},
+                # El prompt gerente necesita el texto, que le llega del analista, 
+                # pero Haystack a veces pide inicialización vacía si es compleja
+            },
+            include_outputs_from={"llm_analista"}
+        )
+        borrador = res["llm_analista"]["replies"][0]
+        final = res["llm_gerente"]["replies"][0]
+        
+        print(f"\n📊 [ANALISTA] Borrador Comparativo:\n{borrador}\n")
+        
+    # --- MODO VENTA (Si es texto normal) ---
+    else:
+        print(f"\n💬 TEXTO NORMAL: Activando Agente Vendedor")
+        res = pipe_venta.run(
+            {"sabueso": {"query": mensaje}},
+            include_outputs_from={"llm_vendedor"}
+        )
+        borrador = res["llm_vendedor"]["replies"][0]
+        final = res["llm_gerente"]["replies"][0]
+        
+        print(f"\n💰 [VENDEDOR] Borrador de Venta:\n{borrador}\n")
 
-    # 4. IMPRIMIMOS EL DEBATE EN LA TERMINAL
-    print("\n" + "="*50)
-    print(f"🤖 AGENTE 2 (VENDEDOR) generó este borrador:")
-    print("-" * 20)
-    print(borrador_vendedor)
-    print("="*50)
-    
-    print(f"🧐 AGENTE 3 (GERENTE) corrigió y aprobó:")
-    print("-" * 20)
-    print(respuesta_final)
-    print("="*50 + "\n")
+    print(f"✅ [GERENTE] Aprobado.")
 
-    # 5. Enviamos solo la versión final al chat web
     if history is None: history = []
     history.append({"role": "user", "content": mensaje})
-    history.append({"role": "assistant", "content": respuesta_final})
+    history.append({"role": "assistant", "content": final})
     return "", history
 
+# =========================
+# 7. INTERFAZ GRÁFICA (Visualización de Workflows)
+# =========================
+
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
-    gr.Markdown("# 🤖 Autofesa Multi-Agent System")
+    gr.Markdown("# 🤖 Autofesa: Sistema Multi-Agente Híbrido")
+    
+    # Explicación visual para tu práctica
     gr.Markdown("""
-    **Workflow Activo:**
-    1. 🐶 **Sabueso:** Busca en base de datos FAISS.
-    2. 👨‍💼 **Vendedor:** Redacta borrador persuasivo.
-    3. 🧐 **Gerente:** Valida datos y aprueba respuesta final.
+    ### 🔀 Arquitectura de Agentes Dinámica
+    El sistema detecta automáticamente la intención del usuario y activa el pipeline correspondiente:
+
+    | Input del Usuario | Modo Activo | Flujo de Agentes (Workflow) |
+    | :--- | :--- | :--- |
+    | **Texto Normal** <br> *(ej: "Busco un BMW barato")* | **💰 MODO VENTA** | 🐶 **Sabueso** (Data) → 👨‍💼 **Vendedor** (Creativo) → 🧐 **Gerente** (Validador) |
+    | **Enlace URL** <br> *(ej: "Mira este coche: https://...")* | **📊 MODO ANALISTA** | 🌐 **Scraper** (Web) → 🐶 **Sabueso** (Contexto) → 📊 **Analista** (Comparador) → 🧐 **Gerente** (Validador) |
     """)
     
-    chatbot = gr.Chatbot(type="messages", height=450)
-    msg = gr.Textbox(label="Consulta", placeholder="Busco un coche familiar por menos de 15000 euros...")
-    msg.submit(procesar_consulta, [msg, chatbot], [msg, chatbot])
+    # Componentes del Chat
+    chatbot = gr.Chatbot(type="messages", height=450, label="Historial de Conversación")
+    msg = gr.Textbox(
+        label="Tu Mensaje", 
+        placeholder="Escribe 'Busco un Audi' o pega un enlace para comparar..."
+    )
+    
+    # Botones adicionales para limpiar
+    with gr.Row():
+        btn_send = gr.Button("Enviar", variant="primary")
+        btn_clear = gr.Button("Limpiar Chat")
+
+    # Eventos
+    # Enter presionado
+    msg.submit(chat_logic, [msg, chatbot], [msg, chatbot])
+    # Botón enviar clickeado
+    btn_send.click(chat_logic, [msg, chatbot], [msg, chatbot])
+    # Botón limpiar
+    btn_clear.click(lambda: None, None, chatbot, queue=False)
 
 if __name__ == "__main__":
     demo.launch(server_name="0.0.0.0", share=False)
