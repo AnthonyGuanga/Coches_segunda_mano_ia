@@ -73,59 +73,65 @@ print("✅ RAG Listo.")
 # ✅ REQUISITO CUMPLIDO: Definir instrucciones usando PromptTemplate de LangChain
 # Aunque Haystack usará el string, lo definimos formalmente con la clase de LangChain.
 
+# =========================
+# 4. DEFINICIÓN DE ROLES CON LANGCHAIN PROMPT TEMPLATES (CORREGIDO)
+# =========================
+
+# NOTA: Añadimos template_format="jinja2" para que LangChain respete las 
+# dobles llaves {{ }} que necesita Haystack para funcionar.
+
 # ROL 1: VENDEDOR
 lc_prompt_vendedor = PromptTemplate(
     input_variables=["documents", "query"],
+    template_format="jinja2", # <--- ¡ESTO ES LA CLAVE DEL ARREGLO!
     template="""
-    Rol: Eres un vendedor de coches entusiasta y experto.
+    Rol: Eres un vendedor de coches honesto de Autofesa.
     
-    Información del Inventario (RAG Context):
+    Información del Inventario (Contexto Real):
     {% for doc in documents %}
-      {{ doc.content }}
+      - Modelo: {{ doc.meta['Modelo'] }} | Precio: {{ doc.meta['Precio'] }}€ | Info: {{ doc.content }}
     {% endfor %}
     
     Cliente busca: {{ query }}
     
-    Tarea: Escribe una propuesta comercial atractiva basada SOLAMENTE en el inventario de arriba.
-    Si no hay coches en la lista, dilo educadamente.
+    INSTRUCCIONES:
+    1. Si el inventario está vacío o no encaja por precio (diferencia > 30%), di: "No tenemos exactamente eso, pero mira esto...".
+    2. Si encaja, ¡véndelo con entusiasmo!
+    3. NO uses marcadores como "[Tu nombre]". Eres "El Asistente de Autofesa".
     """
 )
 
 # ROL 2: ANALISTA
 lc_prompt_analista = PromptTemplate(
     input_variables=["external_data", "documents"],
+    template_format="jinja2", # <--- IMPORTANTE
     template="""
-    Rol: Eres un Analista de Mercado imparcial.
+    Rol: Eres un Analista de Mercado.
     
-    COCHE EXTERNO (Web Scraped):
+    COCHE EXTERNO:
     {{ external_data }}
     
-    NUESTRO INVENTARIO (Internal DB):
+    NUESTRO INVENTARIO:
     {% for doc in documents %}
-      {{ doc.content }}
+      - {{ doc.content }}
     {% endfor %}
     
-    Tarea: Crea una TABLA COMPARATIVA detallada entre el coche externo y nuestra mejor opción.
-    Sé objetivo.
+    Tarea: Comparativa detallada (Tabla) entre el coche externo y el nuestro.
     """
 )
 
-# ROL 3: GERENTE (CRÍTICO) - VERSIÓN ESTRICTA
+# ROL 3: GERENTE
 lc_prompt_gerente = PromptTemplate(
     input_variables=["draft_text"],
+    template_format="jinja2", # <--- IMPORTANTE
     template="""
-    Rol: Eres el Gerente de Calidad de Autofesa. Tu trabajo es filtrar y pulir mensajes.
+    Rol: Gerente de Calidad.
     
-    Borrador recibido del Vendedor: 
+    Borrador: 
     {{ draft_text }}
     
-    INSTRUCCIONES DE SALIDA (ESTRICTAS):
-    1. Tu objetivo es generar la RESPUESTA FINAL lista para copiar y pegar al cliente.
-    2. NO incluyas notas internas como "Evaluación", "Mejoras", "Tono" o "Claridad".
-    3. NO saludes diciendo "Aquí tienes la versión corregida".
-    4. Corrige cualquier alucinación (ej: si dice USD, cámbialo a Euros).
-    
-    Respuesta Final (y nada más):
+    Tarea: Genera la respuesta FINAL para el cliente.
+    Corrección: Elimina saludos genéricos o placeholders. Asegura que los datos sean los del inventario.
     """
 )
 # =========================
@@ -209,7 +215,9 @@ def chat_logic(mensaje, history):
     url = detectar_url(mensaje)
     
     if url:
-        # Workflow B: Colaboración Scraper -> Sabueso -> Analista -> Gerente
+        # Workflow B: COMPARADOR
+        # Aquí NO hace falta pasar 'query' extra porque todo se conecta internamente 
+        # (Scraper -> Analista)
         print(f"\n🔄 WORKFLOW: COMPARACIÓN (Link detectado)")
         res = pipe_comparador.run(
             {"scraper": {"url": url}},
@@ -220,10 +228,16 @@ def chat_logic(mensaje, history):
         print(f"📊 [Analista] generó:\n{borrador[:100]}...\n")
         
     else:
-        # Workflow A: Colaboración Sabueso -> Vendedor -> Gerente
+        # Workflow A: VENTA
         print(f"\n🔄 WORKFLOW: VENTA")
+        # ⚠️ CORRECCIÓN AQUÍ ABAJO:
+        # Hay que pasar 'query' tanto al Sabueso (para buscar) 
+        # como al Prompt (para que el vendedor sepa qué contestar)
         res = pipe_venta.run(
-            {"sabueso": {"query": mensaje}},
+            {
+                "sabueso": {"query": mensaje}, 
+                "prompt_vendedor": {"query": mensaje} # <--- AÑADIR ESTA LÍNEA
+            },
             include_outputs_from={"llm_vendedor"}
         )
         borrador = res["llm_vendedor"]["replies"][0]
