@@ -23,7 +23,7 @@ from haystack_integrations.components.generators.google_ai import GoogleAIGemini
 # =========================
 load_dotenv()
 BASE_DIR = os.getcwd()
-CSV_PATH = os.path.join(BASE_DIR, "autofesa_completo_20251202_0932.csv")
+CSV_PATH = os.path.join(BASE_DIR, "data/autofesa_completo_20251202_0932.csv")
 
 GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
 if not GOOGLE_KEY:
