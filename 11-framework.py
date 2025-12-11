@@ -123,17 +123,24 @@ lc_prompt_analista = PromptTemplate(
 # ROL 3: GERENTE
 lc_prompt_gerente = PromptTemplate(
     input_variables=["draft_text"],
-    template_format="jinja2", # <--- IMPORTANTE
+    template_format="jinja2",
     template="""
-    Rol: Gerente de Calidad.
-    
-    Borrador: 
-    {{ draft_text }}
-    
-    Tarea: Genera la respuesta FINAL para el cliente.
-    Corrección: Elimina saludos genéricos o placeholders. Asegura que los datos sean los del inventario.
-    """
+Rol: Gerente de Calidad y Experto en comunicación con clientes.
+
+Borrador recibido:
+{{ draft_text }}
+
+Tarea: 
+1. Reescribe el mensaje para que sea **claro, fluido y persuasivo**, listo para enviar al cliente.
+2. Asegúrate de que todos los datos sean **exactos y coincidan con el inventario** (precio, link, modelo, año, etc.).
+3. Elimina saludos genéricos, placeholders o frases redundantes.
+4. Mantén un estilo profesional pero cercano, con párrafos cortos y fáciles de leer.
+5. No agregues información que no esté en el borrador ni inventes detalles.
+
+Salida: Solo el texto final pulido, listo para enviar, sin notas ni explicaciones adicionales.
+"""
 )
+
 # =========================
 # 5. COMPONENTES (TOOLS & AGENTS)
 # =========================
