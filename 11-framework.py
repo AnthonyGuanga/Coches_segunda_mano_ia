@@ -134,7 +134,7 @@ class WebScraperComponent:
             return {"scraped_content": "No se pudo leer la web."}
 
 # -------------------------
-# NUEVO COMPONENTE: VEHICLE SAFETY
+# COMPONENTE: VEHICLE SAFETY
 # -------------------------
 @component
 class VehicleSafetyComponent:
@@ -223,6 +223,12 @@ pipe_comparador.connect("prompt_analista", "llm_analista")
 pipe_comparador.connect("llm_analista.replies", "prompt_gerente.draft_text")
 pipe_comparador.connect("prompt_gerente", "llm_gerente")
 
+# ---PIPELINE GERENTE SOLO PARA PULIR 
+pipe_gerente_solo = Pipeline()
+pipe_gerente_solo.add_component("prompt_gerente", PromptBuilder(template=lc_prompt_gerente.template))
+pipe_gerente_solo.add_component("llm_gerente", GoogleAIGeminiGenerator(model="gemini-2.0-flash"))
+pipe_gerente_solo.connect("prompt_gerente", "llm_gerente")
+
 print("✅ Sistemas listos.")
 
 # =========================
@@ -267,15 +273,67 @@ def chat_logic(mensaje, history):
         else:
             res = VehicleSafetyComponent().run(**params)
             report = res["safety_report"]
-            final = f"Marca: {report['resolved']['make']}\nModelo: {report['resolved']['model']}\nAño: {report['resolved']['year']}\n"
-            if report['total_recalls'] == 0:
-                final += "No se encontraron recalls activos para este vehículo.\n"
+
+            # ===============================
+            # BORRADOR PARA GERENTE 
+            # ===============================
+
+            recalls_md = ""
+            if report['recalls']:
+                items = []
+                for i, r in enumerate(report['recalls'], start=1):
+                    campaign = r.get('campaign_number') or "-"
+                    comp = r.get('component') or "-"
+                    date = r.get('date') or "-"
+                    summary = r.get('summary') or "-"
+                    items.append(f"{i}. Campaña: {campaign} | Componente: {comp} | Fecha: {date}\n   Resumen: {summary}")
+                recalls_md = "\n".join(items)
             else:
-                final += f"Total recalls: {report['total_recalls']}\nDetalles: {report['recalls']}\n"
-            if report.get("error"):
-                final += f"⚠️ Error al consultar la API: {report['error']}\n"
-            if report['recommendations']:
-                final += "Recomendaciones:\n- " + "\n- ".join(report['recommendations'])
+                recalls_md = "No se han encontrado recalls."
+
+            safety_ratings = report.get('safety_ratings') or {}
+            # Formateo de calificaciones
+            ratings_lines = []
+            if safety_ratings:
+                if safety_ratings.get('overall_rating') is not None:
+                    ratings_lines.append(f"- Valoración global: {safety_ratings.get('overall_rating')}")
+                if safety_ratings.get('frontal_crash') is not None:
+                    ratings_lines.append(f"- Impacto frontal: {safety_ratings.get('frontal_crash')}")
+                if safety_ratings.get('side_crash') is not None:
+                    ratings_lines.append(f"- Impacto lateral: {safety_ratings.get('side_crash')}")
+                if safety_ratings.get('rollover') is not None:
+                    ratings_lines.append(f"- Riesgo vuelco: {safety_ratings.get('rollover')}")
+            else:
+                ratings_lines.append("No hay calificaciones de seguridad disponibles.")
+
+            recommendations = report.get('recommendations') or []
+
+            borrador = f"""
+Marca: {report['resolved']['make']}
+Modelo: {report['resolved']['model']}
+Año: {report['resolved']['year']}
+
+Recalls:
+{recalls_md}
+
+Calificaciones de seguridad:
+{chr(10).join(ratings_lines)}
+
+Recomendaciones:
+{chr(10).join(f'- {r}' for r in recommendations) if recommendations else '- Ninguna recomendación específica'}
+
+Error API (si existe):
+{report.get('error') or 'Ninguno'}
+"""
+
+            # ===============================
+            # PASAR EL BORRADOR AL GERENTE (PIPELINE INTEGRADO)
+            # ===============================
+            pulido = pipe_gerente_solo.run(
+                {"prompt_gerente": {"draft_text": borrador}}
+            )
+            final = pulido["llm_gerente"]["replies"][0]
+
     elif url:
         print(f"🔄 WORKFLOW: COMPARACIÓN")
         res = pipe_comparador.run(
