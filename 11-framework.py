@@ -250,7 +250,7 @@ def interpretar_seguridad(texto: str) -> Dict[str, Any]:
     return {"make": make, "model": model, "year": year}
 
 # =========================
-# 8. LOGICA Y UI
+# 8. LOGICA Y UI (MEJORADA Y FORMATEADA)
 # =========================
 def detectar_url(texto):
     match = re.search(r'(https?://\S+)', texto)
@@ -259,45 +259,82 @@ def detectar_url(texto):
 def chat_logic(mensaje, history):
     url = detectar_url(mensaje)
 
+    # --- CAMINO 1: SEGURIDAD (FORMATEADO BONITO) ---
     if es_consulta_seguridad(mensaje):
         print("🔄 WORKFLOW: SEGURIDAD/RECALLS")
         params = interpretar_seguridad(mensaje)
+        
         if not all([params.get("make"), params.get("model"), params.get("year")]):
-            final = "No pude identificar correctamente marca, modelo o año. Por favor, escribe algo como 'Ford Escape 2014'."
+            final = "❌ No pude identificar el coche exacto. Por favor, prueba escribiendo: 'Recalls Ford Fusion 2014' o 'Seguridad BMW X5 2020'."
         else:
+            # Llamamos a la Tool
             res = VehicleSafetyComponent().run(**params)
             report = res["safety_report"]
-            final = f"Marca: {report['resolved']['make']}\nModelo: {report['resolved']['model']}\nAño: {report['resolved']['year']}\n"
-            if report['total_recalls'] == 0:
-                final += "No se encontraron recalls activos para este vehículo.\n"
+            
+            # Encabezado del Informe
+            final = f"🛡️ **INFORME DE SEGURIDAD OFICIAL (NHTSA)**\n"
+            final += f"Vehículo: {report['resolved']['make']} {report['resolved']['model']} ({report['resolved']['year']})\n"
+            final += "-" * 40 + "\n"
+
+            # 1. Safety Ratings (Estrellas)
+            ratings = report.get('safety_ratings', {})
+            if ratings and ratings.get('overall_rating'):
+                final += f"⭐ **Puntuación Global:** {ratings['overall_rating']}/5 Estrellas\n"
+                final += f"   - Choque Frontal: {ratings.get('frontal_crash', '?')}/5\n"
+                final += f"   - Choque Lateral: {ratings.get('side_crash', '?')}/5\n"
+                final += f"   - Vuelco: {ratings.get('rollover', '?')}/5\n\n"
             else:
-                final += f"Total recalls: {report['total_recalls']}\nDetalles: {report['recalls']}\n"
-            if report.get("error"):
-                final += f"⚠️ Error al consultar la API: {report['error']}\n"
+                final += "ℹ️ No hay datos de estrellas de choque disponibles.\n\n"
+
+            # 2. Recalls (Llamadas a revisión)
+            total = report['total_recalls']
+            if total == 0:
+                final += "✅ **ESTADO: EXCELENTE.**\nNo se han encontrado llamadas a revisión (recalls) para este vehículo."
+            else:
+                final += f"⚠️ **ESTADO: PRECAUCIÓN**\nSe han encontrado **{total} alertas de seguridad (Recalls)** reportadas al gobierno.\n\n"
+                final += "**Últimos problemas reportados:**\n"
+                
+                # MOSTRAR SOLO LOS 3 PRIMEROS PARA NO SATURAR
+                recalls = report['recalls']
+                for i, rec in enumerate(recalls[:3]): 
+                    fecha = rec['date']
+                    pieza = rec['component']
+                    # Cortamos el resumen si es muy largo
+                    resumen = rec['summary'][:150] + "..." if len(rec['summary']) > 150 else rec['summary']
+                    
+                    final += f"🔴 **{fecha}** | Fallo en: {pieza}\n"
+                    final += f"   _{resumen}_\n\n"
+                
+                if total > 3:
+                    final += f"... y {total - 3} alertas más. (Consulta con el concesionario).\n"
+
+            # 3. Recomendaciones
             if report['recommendations']:
-                final += "Recomendaciones:\n- " + "\n- ".join(report['recommendations'])
+                final += "-" * 40 + "\n💡 **Consejo del Experto:** " + report['recommendations'][0]
+
+    # --- CAMINO 2: COMPARADOR WEB ---
     elif url:
         print(f"🔄 WORKFLOW: COMPARACIÓN")
         res = pipe_comparador.run(
             {"scraper": {"url": url}},
             include_outputs_from={"llm_analista"}
         )
-        borrador = res["llm_analista"]["replies"][0]
+        # final = res["llm_gerente"]["replies"][0] # A veces el gerente falla si no hay contexto, mejor ver al analista directo si quieres
         final = res["llm_gerente"]["replies"][0]
+
+    # --- CAMINO 3: VENTA NORMAL ---
     else:
         print(f"🔄 WORKFLOW: VENTA")
         res = pipe_venta.run(
             {
-                "sabueso": {"query": mensaje},
+                "sabueso": {"query": mensaje}, 
                 "prompt_vendedor": {"query": mensaje}
             },
             include_outputs_from={"llm_vendedor"}
         )
-        borrador = res["llm_vendedor"]["replies"][0]
         final = res["llm_gerente"]["replies"][0]
 
-    if history is None:
-        history = []
+    if history is None: history = []
     history.append({"role": "user", "content": mensaje})
     history.append({"role": "assistant", "content": final})
     return "", history
