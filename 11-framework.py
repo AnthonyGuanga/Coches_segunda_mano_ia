@@ -4,6 +4,8 @@ import gradio as gr
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import httpx
+import xml.etree.ElementTree as ET
+
 
 # ---- 1. IMPORTS LANGCHAIN (CUMPLIENDO REQUISITOS) ----
 from langchain_community.vectorstores import FAISS
@@ -190,6 +192,70 @@ class VehicleSafetyComponent:
         if recalls_error:
             out['error'] = recalls_error
         return {"safety_report": out}
+    
+    # -------------------------
+# NUEVO COMPONENTE: VEHICLE FUEL ECONOMY
+# -------------------------
+@component
+class VehicleFuelEconomyComponent:
+    @component.output_types(fuel_report=dict)
+    def run(self, make: str, model: str, year: int):
+        vehicle_id = None
+        fuel_data = {}
+        error = None
+
+        # 1. Buscar vehicleId en la API de la EPA
+        try:
+            search_url = "https://www.fueleconomy.gov/ws/rest/vehicle/menu/options"
+            params = {"year": year, "make": make, "model": model}
+            r = httpx.get(search_url, params=params, timeout=10.0)
+            r.raise_for_status()
+
+            root = ET.fromstring(r.text)
+            option = root.find(".//menuItem")
+            if option is not None:
+                vehicle_id = option.find("value").text
+        except Exception as e:
+            error = f"No se pudo localizar el vehículo: {e}"
+
+        # 2. Obtener datos de consumo
+        if vehicle_id:
+            try:
+                detail_url = f"https://www.fueleconomy.gov/ws/rest/vehicle/{vehicle_id}"
+                r = httpx.get(detail_url, timeout=10.0)
+                r.raise_for_status()
+                root = ET.fromstring(r.text)
+
+                def get(tag):
+                    el = root.find(tag)
+                    return el.text if el is not None else None
+
+                fuel_data = {
+                    "fuel_type": get("fuelType"),
+                    "city_mpg": get("city08"),
+                    "highway_mpg": get("highway08"),
+                    "combined_mpg": get("comb08"),
+                    "co2_emissions": get("co2TailpipeGpm"),
+                }
+            except Exception as e:
+                error = f"No se pudieron obtener datos de consumo: {e}"
+
+        report = {
+            "resolved": {"make": make, "model": model, "year": year},
+            "fuel_data": fuel_data,
+            "recommendations": [],
+        }
+
+        if fuel_data.get("combined_mpg"):
+            report["recommendations"].append(
+                "Buen candidato si buscas eficiencia en consumo."
+            )
+
+        if error:
+            report["error"] = error
+
+        return {"fuel_report": report}
+
 
 # =========================
 # 6. ORQUESTACIÓN (PIPELINES)
@@ -230,6 +296,86 @@ print("✅ Sistemas listos.")
 # =========================
 def es_consulta_seguridad(texto: str) -> bool:
     return bool(re.search(r'\b(recalls?|seguridad|safety|aviso de seguridad|revisión)\b', texto, re.I))
+
+def es_consulta_consumo(texto: str) -> bool:
+    return bool(re.search(
+        r'\b(consumo|combustible|gasolina|di[eé]sel|mpg|gasta)\b',
+        texto,
+        re.I
+    ))
+
+
+def mpg_a_litros_100km(mpg: float) -> float:
+    """
+    Convierte Millas por Galón (MPG - EE.UU.) a Litros por 100 km.
+    Fórmula estándar:
+    L/100km = 235.215 / MPG
+    """
+    try:
+        mpg = float(mpg)
+        if mpg <= 0:
+            return None
+        return round(235.215 / mpg, 1)
+    except (TypeError, ValueError):
+        return None
+
+def formatear_informe_consumo(report: dict) -> str:
+    resolved = report.get("resolved", {})
+    data = report.get("fuel_data", {})
+    recs = report.get("recommendations", [])
+
+    make = resolved.get("make", "")
+    model = resolved.get("model", "")
+    year = resolved.get("year", "")
+
+    final = ""
+    final += "⛽ **INFORME OFICIAL DE CONSUMO Y EFICIENCIA**\n"
+    final += f"Vehículo analizado: **{make} {model} ({year})**\n"
+    final += "Fuente: Agencia de Protección Ambiental (EPA - EE.UU.)\n"
+    final += "—" * 45 + "\n\n"
+
+    if not data:
+        final += "ℹ️ No se han encontrado datos oficiales de consumo para este vehículo."
+        return final
+
+    # Datos MPG
+    city_mpg = data.get("city_mpg")
+    highway_mpg = data.get("highway_mpg")
+    combined_mpg = data.get("combined_mpg")
+
+    # Conversión a L/100km
+    city_l = mpg_a_litros_100km(city_mpg)
+    highway_l = mpg_a_litros_100km(highway_mpg)
+    combined_l = mpg_a_litros_100km(combined_mpg)
+
+    final += "📊 **Consumo homologado**\n"
+
+    if city_mpg and city_l:
+        final += f"• Uso urbano: **{city_l} L/100 km** ({city_mpg} MPG)\n"
+    else:
+        final += "• Uso urbano: No disponible\n"
+
+    if highway_mpg and highway_l:
+        final += f"• Carretera: **{highway_l} L/100 km** ({highway_mpg} MPG)\n"
+    else:
+        final += "• Carretera: No disponible\n"
+
+    if combined_mpg and combined_l:
+        final += f"• Combinado: **{combined_l} L/100 km** ({combined_mpg} MPG)\n"
+    else:
+        final += "• Combinado: No disponible\n"
+
+    final += "\n🌱 **Impacto medioambiental**\n"
+    final += f"• Emisiones de CO₂: **{data.get('co2_emissions', '?')} g/milla**\n"
+    final += f"• Tipo de combustible: **{data.get('fuel_type', 'No especificado')}**\n\n"
+
+    if recs:
+        final += "💡 **Evaluación experta**\n"
+        final += f"{recs[0]}\n"
+
+    final += "\nℹ️ *Nota: valores oficiales EPA (EE.UU.). El consumo real puede variar según conducción.*"
+
+    return final
 
 def interpretar_seguridad(texto: str) -> Dict[str, Any]:
     marcas = ["Ford","Toyota","BMW","Hyundai","Honda","Chevrolet","Nissan","Kia","Mercedes","Volkswagen"]
@@ -311,6 +457,16 @@ def chat_logic(mensaje, history):
             # 3. Recomendaciones
             if report['recommendations']:
                 final += "-" * 40 + "\n💡 **Consejo del Experto:** " + report['recommendations'][0]
+    
+    elif es_consulta_consumo(mensaje):
+        print("🔄 WORKFLOW: CONSUMO / EFICIENCIA")
+        params = interpretar_seguridad(mensaje)
+
+        if not all([params.get("make"), params.get("model"), params.get("year")]):
+            final = "❌ No pude identificar el coche. Prueba: 'Consumo Toyota Corolla 2016'."
+        else:
+            res = VehicleFuelEconomyComponent().run(**params)
+            final = formatear_informe_consumo(res["fuel_report"])
 
     # --- CAMINO 2: COMPARADOR WEB ---
     elif url:
@@ -350,7 +506,7 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
     chatbot = gr.Chatbot(type="messages", height=450)
     msg = gr.Textbox(
         label="Mensaje",
-        placeholder="Busco coche... o pega un link para comparar o consulta seguridad"
+        placeholder="Busco coche... o pega un link para comparar o consulta seguridad/consumo.",
     )
     msg.submit(chat_logic, [msg, chatbot], [msg, chatbot])
 
