@@ -19,7 +19,8 @@ os.environ["LANGCHAIN_ENDPOINT"] = ""
 os.environ["LANGCHAIN_API_KEY"] = ""
 
 # --- CONFIGURACIÓN DE API KEYS DESDE .env ---
-load_dotenv()
+from pathlib import Path
+load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
 GOOGLE_KEY = os.getenv("GOOGLE_API_KEY")
 TAVILY_KEY = os.getenv("TAVILY_API_KEY")
@@ -49,6 +50,8 @@ class AgentState(TypedDict):
     analysis_text: str         # Borrador del informe
     is_sufficient: bool        # Control de calidad
     final_file_path: str       # Ruta del archivo final
+    pdf_file_path: str         # Ruta del PDF final
+    audio_file_path: str       # Ruta del audio final
 
 # Herramienta 1: Búsqueda Web
 search_tool = TavilySearch(max_results=3)
@@ -70,6 +73,49 @@ def save_report_to_disk(content: str, filename: str) -> str:
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return path
+
+# --- 3. HERRAMIENTAS ADICIONALES DE GENERACIÓN / SALIDA REAL ---
+
+# 🔊 Herramienta 4: Texto a voz (gTTS)
+from gtts import gTTS
+
+@tool
+def generate_audio_from_text(content: str, filename: str) -> str:
+    """
+    Convierte el texto en audio mp3 y devuelve la ruta del archivo.
+    """
+    clean_name = "".join([c if c.isalnum() else "_" for c in filename]) + "_report.mp3"
+    path = os.path.abspath(clean_name)
+    tts = gTTS(text=content, lang='es')
+    tts.save(path)
+    return path
+
+
+# 📄 Herramienta 5: Generación de PDF
+from fpdf import FPDF
+
+@tool
+def generate_pdf_from_text(content: str, filename: str) -> str:
+    """
+    Convierte el texto en un archivo PDF y devuelve la ruta del archivo.
+    """
+    clean_name = "".join([c if c.isalnum() else "_" for c in filename]) + "_report.pdf"
+    path = os.path.abspath(clean_name)
+    
+    pdf = FPDF()
+    pdf.add_page()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_font('DejaVu', '', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', uni=True)
+    pdf.set_font("DejaVu", size=12)
+
+    
+    # Dividir texto en líneas para que se ajuste al ancho
+    for line in content.split("\n"):
+        pdf.multi_cell(0, 6, line)
+    
+    pdf.output(path)
+    return path
+
 
 # --- 4. NODOS DEL GRAFO (AGENTES) ---
 
@@ -128,8 +174,17 @@ def publisher_node(state: AgentState):
     final_content = f"# REPORTE AUTO-GENERADO\nFecha: 09-Enero\n\n{state['analysis_text']}"
     
     # Usa herramienta de disco
-    file_path = save_report_to_disk.invoke({"content": final_content, "filename": state['car_model']})
-    return {"final_file_path": file_path}
+    file_path_md = save_report_to_disk.invoke({"content": final_content, "filename": state['car_model']})
+    
+    # NUEVAS SALIDAS
+    file_path_mp3 = generate_audio_from_text.invoke({"content": final_content, "filename": state['car_model']})
+    file_path_pdf = generate_pdf_from_text.invoke({"content": final_content, "filename": state['car_model']})
+    
+    return {
+        "final_file_path": file_path_md,
+        "audio_file_path": file_path_mp3,
+        "pdf_file_path": file_path_pdf
+    }
 
 # --- 5. CONSTRUCCIÓN DEL GRAFO (LangGraph) ---
 
@@ -166,15 +221,20 @@ def run_multi_agent_system(car_input):
     """Función puente entre Gradio y LangGraph."""
     initial_state = {
         "car_model": car_input,
-        "search_results": [], "market_prices": [],
-        "analysis_text": "", "is_sufficient": False, "final_file_path": ""
+        "search_results": [],
+        "market_prices": [],
+        "analysis_text": "",
+        "is_sufficient": False,
+        "final_file_path": "",
+        "pdf_file_path": "",      # clave añadida
+        "audio_file_path": ""     # clave añadida
     }
     
     # Invocar el grafo
     result = app.invoke(initial_state)
-    return result["analysis_text"], result["final_file_path"]
+    return result["analysis_text"], result["final_file_path"], result["pdf_file_path"], result["audio_file_path"]
 
-# Diseño visual
+# Diseño visual extendido
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🏎️ Taller de Inteligencia Artificial: Análisis de Coches")
     gr.Markdown("Sistema Multi-Agente con LangGraph, Gemini y Tavily.")
@@ -185,9 +245,15 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             btn = gr.Button("Analizar", variant="primary")
         with gr.Column():
             out_txt = gr.Markdown(label="Resumen")
-            out_file = gr.File(label="Descargar Informe")
+            out_file_md = gr.File(label="Descargar Informe MD")
+            out_file_pdf = gr.File(label="Descargar Informe PDF")
+            out_file_mp3 = gr.File(label="Descargar Audio MP3")
             
-    btn.click(run_multi_agent_system, inputs=inp, outputs=[out_txt, out_file])
+    btn.click(
+        run_multi_agent_system, 
+        inputs=inp, 
+        outputs=[out_txt, out_file_md, out_file_pdf, out_file_mp3]
+    )
 
 if __name__ == "__main__":
     demo.launch()
