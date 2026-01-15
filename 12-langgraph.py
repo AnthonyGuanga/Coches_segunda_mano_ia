@@ -52,6 +52,7 @@ class AgentState(TypedDict):
     final_file_path: str       # Ruta del archivo final
     pdf_file_path: str         # Ruta del PDF final
     audio_file_path: str       # Ruta del audio final
+    email_status: str          # Estado del email 
 
 # Herramienta 1: Búsqueda Web
 search_tool = TavilySearch(max_results=3)
@@ -116,6 +117,36 @@ def generate_pdf_from_text(content: str, filename: str) -> str:
     pdf.output(path)
     return path
 
+# 📧 Herramienta 6: Envío de email SIMULADO (SMTP)
+from email.message import EmailMessage
+
+@tool
+def send_email_simulated(
+    recipient: str,
+    subject: str,
+    body: str
+) -> str:
+    """
+    Simula el envío de un email usando SMTP.
+    No requiere credenciales reales.
+    """
+    msg = EmailMessage()
+    msg["From"] = "ai-system@demo.com"
+    msg["To"] = recipient
+    msg["Subject"] = subject
+    msg.set_content(body)
+
+    # Simulación del envío
+    print("\n📧 ===== EMAIL SIMULADO =====")
+    print("De:", msg["From"])
+    print("Para:", msg["To"])
+    print("Asunto:", msg["Subject"])
+    print("Cuerpo:\n", body[:300], "...\n")
+    print("📧 =========================\n")
+
+    return f"Email enviado correctamente a {recipient} (simulado)"
+
+
 
 # --- 4. NODOS DEL GRAFO (AGENTES) ---
 
@@ -168,8 +199,8 @@ def analyst_node(state: AgentState):
 
 
 def publisher_node(state: AgentState):
-    """AGENTE 3: Genera el entregable final."""
-    print("🖨️ [Editor] Guardando archivo físico...")
+    """AGENTE 3: Genera el entregable final y envia email."""
+    print("🖨️ [Editor] Guardando archivo físico y enviando email...")
     
     final_content = f"# REPORTE AUTO-GENERADO\nFecha: 09-Enero\n\n{state['analysis_text']}"
     
@@ -179,11 +210,17 @@ def publisher_node(state: AgentState):
     # NUEVAS SALIDAS
     file_path_mp3 = generate_audio_from_text.invoke({"content": final_content, "filename": state['car_model']})
     file_path_pdf = generate_pdf_from_text.invoke({"content": final_content, "filename": state['car_model']})
+    email_result = send_email_simulated.invoke({
+        "recipient": "cliente@ejemplo.com",
+        "subject": f"Informe automático sobre {state['car_model']}",
+        "body": state['analysis_text'][:1000]
+    })
     
     return {
         "final_file_path": file_path_md,
         "audio_file_path": file_path_mp3,
-        "pdf_file_path": file_path_pdf
+        "pdf_file_path": file_path_pdf,
+        "email_status": email_result
     }
 
 # --- 5. CONSTRUCCIÓN DEL GRAFO (LangGraph) ---
@@ -227,12 +264,13 @@ def run_multi_agent_system(car_input):
         "is_sufficient": False,
         "final_file_path": "",
         "pdf_file_path": "",      # clave añadida
-        "audio_file_path": ""     # clave añadida
+        "audio_file_path": "",   # clave añadida
+        "email_status": "" 
     }
     
     # Invocar el grafo
     result = app.invoke(initial_state)
-    return result["analysis_text"], result["final_file_path"], result["pdf_file_path"], result["audio_file_path"]
+    return result["analysis_text"], result["final_file_path"], result["pdf_file_path"], result["audio_file_path"], result["email_status"]
 
 # Diseño visual extendido
 with gr.Blocks(theme=gr.themes.Soft()) as demo:
@@ -248,11 +286,12 @@ with gr.Blocks(theme=gr.themes.Soft()) as demo:
             out_file_md = gr.File(label="Descargar Informe MD")
             out_file_pdf = gr.File(label="Descargar Informe PDF")
             out_file_mp3 = gr.File(label="Descargar Audio MP3")
+            out_email = gr.Textbox(label="Estado del Email")
             
     btn.click(
         run_multi_agent_system, 
         inputs=inp, 
-        outputs=[out_txt, out_file_md, out_file_pdf, out_file_mp3]
+        outputs=[out_txt, out_file_md, out_file_pdf, out_file_mp3, out_email]
     )
 
 if __name__ == "__main__":
