@@ -1,0 +1,52 @@
+# MCP Vehicle Safety Analysis System - Requirements
+
+# Core MCP dependencies
+mcp>=1.0.0
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+pydantic>=2.0.0
+
+# HTTP client and async support
+httpx>=0.25.0
+aiofiles>=23.0.0
+asyncio-mqtt>=0.13.0
+
+# Web scraping and HTML processing  
+beautifulsoup4>=4.12.0
+requests>=2.31.0
+lxml>=4.9.0
+
+# LLM integration (optional)
+google-generativeai>=0.3.0
+openai>=1.3.0
+
+# Email functionality
+aiosmtpd>=1.4.0
+email-validator>=2.0.0
+
+# UI framework
+gradio>=4.0.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Testing
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+pytest-cov>=4.0.0
+pytest-mock>=3.11.0
+
+# Development tools
+black>=23.0.0
+flake8>=6.0.0
+mypy>=1.5.0
+pre-commit>=3.4.0
+
+# Optional: LangGraph integration
+# langgraph>=0.1.0
+# langchain-core>=0.1.0
+
+# Monitoring and logging (optional)
+structlog>=23.0.0
+prometheus-client>=0.17.0
