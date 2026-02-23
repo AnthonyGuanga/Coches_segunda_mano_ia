@@ -1,6 +1,6 @@
 """
 LangGraph Adapter para MCP Server
-Permite usar tools MCP dentro de workflows LangGraph
+Permite usar tools MCP dentro de workflows LangGraph e integra Wikipedia MCP (Terceros)
 """
 
 import asyncio
@@ -11,6 +11,10 @@ from typing import Any, Dict, List, Optional, TypedDict, Annotated
 import httpx
 from langchain_core.tools import BaseTool
 from pydantic import BaseModel, Field
+
+# Imports para conectarse al MCP externo (Wikipedia)
+from mcp import StdioServerParameters, ClientSession
+from mcp.client.stdio import stdio_client
 
 # Import MCP tools for fallback
 try:
@@ -150,12 +154,14 @@ class MCPLangChainTool(BaseTool):
             logger.error(f"Error in MCP tool {self.mcp_tool_name}: {e}")
             return json.dumps({"success": False, "error": str(e)}, ensure_ascii=False)
 
-# LangGraph State
+# LangGraph State actualizado con datos de Wikipedia
 class AgentState(TypedDict):
     messages: Annotated[List[Dict[str, Any]], "The messages in the conversation"]
     user_input: str
+    user_email: str
     extracted_info: Optional[Dict[str, Any]]
     safety_report: Optional[Dict[str, Any]]
+    wikipedia_info: Optional[str]  # <-- NUEVO CAMPO TERCEROS
     markdown_path: Optional[str]
     email_sent: Optional[bool]
     error: Optional[str]
@@ -177,13 +183,15 @@ class VehicleSafetyAgent:
         # Add nodes
         workflow.add_node("extract_vehicle_info", self._extract_vehicle_info)
         workflow.add_node("check_safety", self._check_safety)
+        workflow.add_node("search_wikipedia", self._search_wikipedia) # <-- NUEVO NODO
         workflow.add_node("generate_report", self._generate_report)
         workflow.add_node("send_email", self._send_email)
         
-        # Add edges
+        # Add edges actualizados
         workflow.set_entry_point("extract_vehicle_info")
         workflow.add_edge("extract_vehicle_info", "check_safety")
-        workflow.add_edge("check_safety", "generate_report")
+        workflow.add_edge("check_safety", "search_wikipedia")         # <-- ACTUALIZADO
+        workflow.add_edge("search_wikipedia", "generate_report")      # <-- ACTUALIZADO
         workflow.add_edge("generate_report", "send_email")
         workflow.add_edge("send_email", END)
         
@@ -231,6 +239,47 @@ class VehicleSafetyAgent:
             state["error"] = f"Safety check failed: {result.get('error')}"
         
         return state
+
+    async def _search_wikipedia(self, state: AgentState) -> AgentState:
+        """Integración de MCP de Terceros: Buscar contexto en Wikipedia"""
+        logger.info("Buscando contexto histórico en Wikipedia MCP (Terceros)...")
+        
+        if not state.get("extracted_info") or state.get("error"):
+            return state
+
+        make = state["extracted_info"].get("make", "")
+        model = state["extracted_info"].get("model", "")
+        query = f"{make} {model}".strip()
+        
+        if not query:
+            return state
+            
+        try:
+            # Conexión stdio al servidor MCP de Wikipedia
+            server_params = StdioServerParameters(
+                command="npx",
+                args=["-y", "@shelm/wikipedia-mcp-server"],
+                env=None
+            )
+            
+            async with stdio_client(server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    
+                    # Llamamos a la herramienta de búsqueda de Wikipedia
+                    result = await session.call_tool("search", {"query": query})
+                    
+                    if result.content and len(result.content) > 0:
+                        # Extraemos texto de los resultados devueltos por MCP
+                        state["wikipedia_info"] = result.content[0].text
+                    else:
+                        state["wikipedia_info"] = "No se encontraron datos relevantes en Wikipedia para este modelo."
+                        
+        except Exception as e:
+            logger.warning(f"Error consultando Wikipedia MCP (Ignorado para continuar el flujo principal): {e}")
+            state["wikipedia_info"] = "Información contextual de Wikipedia temporalmente no disponible."
+            
+        return state
     
     async def _generate_report(self, state: AgentState) -> AgentState:
         """Generate markdown report"""
@@ -252,7 +301,16 @@ class VehicleSafetyAgent:
 - **Modelo:** {data.get('model')}
 - **Año:** {data.get('year') or 'No especificado'}
 
-## Recalls Encontrados
+"""
+        # INYECTAMOS LA INFORMACIÓN DE TERCEROS (WIKIPEDIA)
+        wiki_info = state.get("wikipedia_info")
+        if wiki_info:
+            content += f"""## Contexto Histórico (Vía Wikipedia MCP)
+{wiki_info}
+
+"""
+
+        content += f"""## Recalls Encontrados
 Total: {data.get('total_recalls', 0)}
 
 """
@@ -369,9 +427,10 @@ Sistema de Análisis de Vehículos
         initial_state = {
             "messages": [],
             "user_input": user_input,
-            "user_email": email.strip(),  # Add email to state
+            "user_email": email.strip(),
             "extracted_info": None,
             "safety_report": None,
+            "wikipedia_info": None,
             "markdown_path": None,
             "email_sent": False,
             "error": None
@@ -383,6 +442,7 @@ Sistema de Análisis de Vehículos
                 "success": not bool(final_state.get("error")),
                 "extracted_info": final_state.get("extracted_info"),
                 "safety_report": final_state.get("safety_report"),
+                "wikipedia_info": final_state.get("wikipedia_info"),
                 "markdown_path": final_state.get("markdown_path"),
                 "email_sent": final_state.get("email_sent"),
                 "error": final_state.get("error")
@@ -396,9 +456,10 @@ Sistema de Análisis de Vehículos
         state = {
             "messages": [],
             "user_input": user_input,
-            "user_email": email.strip(),  # Add email to state
+            "user_email": email.strip(),
             "extracted_info": None,
             "safety_report": None,
+            "wikipedia_info": None,
             "markdown_path": None,
             "email_sent": False,
             "error": None
@@ -413,6 +474,10 @@ Sistema de Análisis de Vehículos
             state = await self._check_safety(state)
             if state.get("error"):
                 return {"success": False, "error": state["error"]}
+                
+            state = await self._search_wikipedia(state) # <-- AÑADIDO AL SECUENCIAL
+            if state.get("error"):
+                return {"success": False, "error": state["error"]}
             
             state = await self._generate_report(state)
             if state.get("error"):
@@ -424,6 +489,7 @@ Sistema de Análisis de Vehículos
                 "success": not bool(state.get("error")),
                 "extracted_info": state.get("extracted_info"),
                 "safety_report": state.get("safety_report"),
+                "wikipedia_info": state.get("wikipedia_info"),
                 "markdown_path": state.get("markdown_path"),
                 "email_sent": state.get("email_sent"),
                 "error": state.get("error")
