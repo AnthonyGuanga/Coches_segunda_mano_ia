@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence
 from pathlib import Path
 from dotenv import load_dotenv
@@ -20,7 +21,7 @@ env_path = project_root / ".env"
 load_dotenv(env_path)
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, Header
+from fastapi import FastAPI, HTTPException, Depends, Header, WebSocket
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -181,7 +182,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             )
         elif name == "send_email_smtp":
             result = await send_email_smtp(
-                to_email=arguments["to_email"],
+                to_email=arguments["recipient"],  # Usar recipient del schema
                 subject=arguments["subject"],
                 body=arguments["body"],
                 attachment_path=arguments.get("attachment_path")
@@ -205,11 +206,11 @@ def _sanitize_args(args: Dict[str, Any]) -> Dict[str, Any]:
     if "vin" in sanitized and sanitized["vin"]:
         sanitized["vin"] = sanitized["vin"][:4] + "***"
     # Hide email addresses
-    if "to_email" in sanitized:
-        email = sanitized["to_email"]
+    if "recipient" in sanitized:
+        email = sanitized["recipient"]
         if "@" in email:
             local, domain = email.split("@", 1)
-            sanitized["to_email"] = f"{local[:2]}***@{domain}"
+            sanitized["recipient"] = f"{local[:2]}***@{domain}"
     return sanitized
 
 # FastAPI endpoints
@@ -275,25 +276,91 @@ async def stream_events(authenticated: bool = Depends(verify_token)):
     """Stream MCP events via Server-Sent Events"""
     
     async def event_stream():
-        # Send initial connection event
-        yield f"data: {json.dumps({'type': 'connected', 'server': 'vehicle-safety-mcp'})}\n\n"
+        # Send initial connection event with proper SSE format
+        yield "event: connected\n"
+        yield f"data: {json.dumps({'type': 'connected', 'server': 'vehicle-safety-mcp', 'timestamp': str(datetime.now())})}\n\n"
+        
+        # Send server info immediately  
+        yield "event: server_info\n"
+        yield f"data: {json.dumps({'type': 'server_info', 'tools_count': len(TOOLS), 'version': '1.0.0'})}\n\n"
         
         # Keep connection alive with periodic pings
         counter = 0
         while True:
             await asyncio.sleep(30)  # Ping every 30 seconds
             counter += 1
-            yield f"data: {json.dumps({'type': 'ping', 'count': counter})}\n\n"
+            yield "event: ping\n"
+            yield f"data: {json.dumps({'type': 'ping', 'count': counter, 'timestamp': str(datetime.now())})}\n\n"
     
     return StreamingResponse(
         event_stream(),
-        media_type="text/plain",
+        media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-            "Content-Type": "text/event-stream",
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Headers": "Cache-Control"
         }
     )
+
+# WebSocket endpoint for real-time communication
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """WebSocket endpoint for real-time MCP communication"""
+    await websocket.accept()
+    
+    try:
+        # Send welcome message
+        await websocket.send_text(json.dumps({
+            "type": "connected",
+            "server": "vehicle-safety-mcp",
+            "version": "1.0.0",
+            "available_tools": [tool.name for tool in TOOLS]
+        }))
+        
+        while True:
+            # Wait for client message
+            data = await websocket.receive_text()
+            try:
+                request = json.loads(data)
+                
+                if request.get("type") == "call_tool":
+                    tool_name = request.get("name")
+                    arguments = request.get("arguments", {})
+                    
+                    # Call the tool
+                    result = await call_tool(tool_name, arguments)
+                    
+                    # Send response
+                    response = {
+                        "type": "tool_result",
+                        "success": True,
+                        "result": [{"type": content.type, "text": content.text} for content in result]
+                    }
+                    await websocket.send_text(json.dumps(response))
+                    
+                elif request.get("type") == "list_tools":
+                    response = {
+                        "type": "tools_list",
+                        "tools": [tool.model_dump() for tool in TOOLS]
+                    }
+                    await websocket.send_text(json.dumps(response))
+                    
+                else:
+                    await websocket.send_text(json.dumps({
+                        "type": "error",
+                        "error": f"Unknown request type: {request.get('type')}"
+                    }))
+                    
+            except json.JSONDecodeError:
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "error": "Invalid JSON format"
+                }))
+                
+    except Exception as e:
+        logger.error(f"WebSocket error: {e}")
+        await websocket.close()
 
 async def run_stdio():
     """Run MCP server with stdio transport"""

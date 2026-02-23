@@ -342,7 +342,7 @@ Sistema de Análisis de Vehículos
         result = await self.mcp_client.call_tool(
             "send_email_smtp",
             {
-                "to_email": user_email,  # Use actual user email
+                "recipient": user_email,  # Use 'recipient' to match MCP schema
                 "subject": subject,
                 "body": body,
                 "attachment_path": state.get("markdown_path")  # Attach the report
