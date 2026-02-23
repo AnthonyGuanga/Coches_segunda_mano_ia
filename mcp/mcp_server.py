@@ -365,12 +365,27 @@ async def websocket_endpoint(websocket: WebSocket):
 async def run_stdio():
     """Run MCP server with stdio transport"""
     logger.info("Starting MCP server with stdio transport...")
-    async with stdio_server() as (read_stream, write_stream):
-        await mcp_server.run(
-            read_stream,
-            write_stream,
-            mcp_server.create_initialization_options()
+    
+    try:
+        # Import all tools functions
+        from tools_mcp import (
+            check_vehicle_safety,
+            llm_extract_vehicle_info, 
+            generate_markdown_report,
+            send_email_smtp
         )
+        
+        async with stdio_server() as (read_stream, write_stream):
+            await mcp_server.run(
+                read_stream,
+                write_stream,
+                mcp_server.create_initialization_options()
+            )
+    except Exception as e:
+        logger.error(f"Error in stdio server: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
 
 def run_http(host: str = "0.0.0.0", port: int = 8000):
     """Run MCP server with HTTP transport"""
