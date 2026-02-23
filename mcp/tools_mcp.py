@@ -19,11 +19,40 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 import httpx
-from bs4 import BeautifulSoup
+from dotenv import load_dotenv
+
+# Load environment variables
+project_root = Path(__file__).parent.parent
+env_path = project_root / ".env"
+load_dotenv(env_path)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+def decode_vin_year(vin: str) -> Optional[int]:
+    """
+    Decode year from VIN (17-character Vehicle Identification Number)
+    The 10th character represents the model year
+    """
+    if not vin or len(vin) != 17:
+        return None
+    
+    year_code = vin[9].upper()
+    
+    # VIN year code mapping (10th character)
+    year_codes = {
+        'A': 2010, 'B': 2011, 'C': 2012, 'D': 2013, 'E': 2014,
+        'F': 2015, 'G': 2016, 'H': 2017, 'J': 2018, 'K': 2019,
+        'L': 2020, 'M': 2021, 'N': 2022, 'P': 2023, 'R': 2024,
+        'S': 2025, 'T': 2026, 'V': 2027, 'W': 2028, 'X': 2029,
+        'Y': 2030,
+        # Numbers for older years
+        '1': 2001, '2': 2002, '3': 2003, '4': 2004, '5': 2005,
+        '6': 2006, '7': 2007, '8': 2008, '9': 2009
+    }
+    
+    return year_codes.get(year_code)
 
 # MCP Tools for Vehicle Safety Analysis
 
@@ -35,6 +64,41 @@ async def check_vehicle_safety(make: str, model: str, year: Optional[int] = None
     Función: Obtiene datos oficiales de seguridad vehicular del gobierno de EE.UU.
     """
     try:
+        # Try to decode year from VIN if year not provided
+        if not year and vin:
+            vin_year = decode_vin_year(vin)
+            if vin_year:
+                year = vin_year
+                logger.info(f"Year decoded from VIN: {year}")
+        
+        # BMW model mapping for NHTSA API compatibility
+        if make.upper() == "BMW":
+            bmw_model_mapping = {
+                "serie 3": "330i",
+                "series 3": "330i", 
+                "3 series": "330i",
+                "3-series": "330i",
+                "serie3": "330i",
+                "serie 5": "530i",
+                "series 5": "530i",
+                "5 series": "530i",
+                "5-series": "530i",
+                "serie5": "530i",
+                "x3": "X3",
+                "x5": "X5",
+                "x1": "X1",
+                "x7": "X7"
+            }
+            
+            model_lower = model.lower().strip()
+            if model_lower in bmw_model_mapping:
+                original_model = model
+                model = bmw_model_mapping[model_lower]
+                logger.info(f"BMW model mapped: '{original_model}' -> '{model}'")
+        
+        # If no year is provided, try common recent years
+        years_to_try = [year] if year else [2019, 2020, 2021, 2022, 2018]
+        
         # Use the correct API endpoint
         recalls_base_url = "https://api.nhtsa.gov/recalls"
         safety_base_url = os.getenv("NHTSA_BASE_URL", "https://api.nhtsa.gov/SafetyRatings")
@@ -42,41 +106,47 @@ async def check_vehicle_safety(make: str, model: str, year: Optional[int] = None
         # Initialize results
         recalls = []
         safety_ratings = {}
+        successful_year = None
         
         async with httpx.AsyncClient() as client:
             # 1. Get vehicle recalls using the working endpoint
-            try:
-                recalls_url = f"{recalls_base_url}/recallsByVehicle"
-                params = {"make": make, "model": model}
-                if year:
-                    params["modelYear"] = year
-                
-                logger.info(f"Searching recalls: {recalls_url} with params: {params}")
-                response = await client.get(recalls_url, params=params, timeout=30)
-                response.raise_for_status()
-                
-                recalls_data = response.json()
-                results = recalls_data.get("results", [])
-                
-                logger.info(f"API response: Found {len(results)} recalls")
-                
-                for recall in results:
-                    recalls.append({
-                        "campaign_number": recall.get("NHTSACampaignNumber", "N/A"),
-                        "manufacturer": recall.get("Manufacturer", "N/A"),
-                        "component": recall.get("Component", "N/A"),
-                        "summary": recall.get("Summary", "N/A"),
-                        "consequence": recall.get("Consequence", "N/A"),
-                        "remedy": recall.get("Remedy", "N/A"),
-                        "date": recall.get("ReportReceivedDate", "N/A"),
-                        "park_it": recall.get("parkIt", False),
-                        "park_outside": recall.get("parkOutSide", False)
-                    })
-                
-                logger.info(f"Found {len(recalls)} recalls for {make} {model} {year or 'all years'}")
-                
-            except Exception as e:
-                logger.warning(f"Error fetching recalls: {e}")
+            for try_year in years_to_try:
+                try:
+                    recalls_url = f"{recalls_base_url}/recallsByVehicle"
+                    params = {"make": make, "model": model}
+                    if try_year:
+                        params["modelYear"] = try_year
+                    
+                    logger.info(f"Searching recalls: {recalls_url} with params: {params}")
+                    response = await client.get(recalls_url, params=params, timeout=30)
+                    response.raise_for_status()
+                    
+                    recalls_data = response.json()
+                    results = recalls_data.get("results", [])
+                    
+                    logger.info(f"API response: Found {len(results)} recalls for year {try_year}")
+                    
+                    if len(results) > 0:
+                        successful_year = try_year
+                        for recall in results:
+                            recalls.append({
+                                "campaign_number": recall.get("NHTSACampaignNumber", "N/A"),
+                                "manufacturer": recall.get("Manufacturer", "N/A"),
+                                "component": recall.get("Component", "N/A"),
+                                "summary": recall.get("Summary", "N/A"),
+                                "consequence": recall.get("Consequence", "N/A"),
+                                "remedy": recall.get("Remedy", "N/A"),
+                                "date": recall.get("ReportReceivedDate", "N/A"),
+                                "park_it": recall.get("parkIt", False),
+                                "park_outside": recall.get("parkOutSide", False)
+                            })
+                        
+                        logger.info(f"Found {len(recalls)} recalls for {make} {model} {try_year}")
+                        break  # Stop trying other years if we found results
+                    
+                except Exception as e:
+                    logger.warning(f"Error fetching recalls for year {try_year}: {e}")
+                    continue
                 
                 # Try alternative model formats if main search fails
                 if len(recalls) == 0:
@@ -182,11 +252,12 @@ async def check_vehicle_safety(make: str, model: str, year: Optional[int] = None
         vehicle_data = {
             "make": make,
             "model": model,
-            "year": year,
+            "year": successful_year or year,  # Use the year that worked, or original year
             "vin": vin,
             "recalls": recalls,
             "safety_ratings": safety_ratings,
-            "total_recalls": len(recalls)
+            "total_recalls": len(recalls),
+            "year_used": successful_year  # Show which year was actually used for the search
         }
         
         return {
@@ -204,40 +275,29 @@ async def check_vehicle_safety(make: str, model: str, year: Optional[int] = None
 
 async def llm_extract_vehicle_info(text: str) -> Dict[str, Any]:
     """
-    Extrae información de vehículos (marca, modelo, año, VIN) de texto en lenguaje natural usando LLM.
+    Extrae información de vehículos (marca, modelo, año, VIN) de texto en lenguaje natural usando Gemini.
     
     Categoría: LLM Processing
-    Función: Procesamiento inteligente de texto con múltiples proveedores LLM y fallback
+    Función: Procesamiento inteligente de texto con Google Gemini únicamente
     """
     try:
-        # Try multiple LLM providers with fallbacks
+        gemini_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
         
-        # 1. Try Google Gemini first
-        gemini_key = os.getenv("GEMINI_API_KEY")
-        if gemini_key:
-            result = await _extract_with_gemini(text, gemini_key)
-            if result["success"]:
-                logger.info("Vehicle info extracted using Gemini")
-                return result
+        if not gemini_key:
+            return {
+                "success": False,
+                "error": "GOOGLE_API_KEY not found in environment variables"
+            }
         
-        # 2. Fallback to OpenAI
-        openai_key = os.getenv("OPENAI_API_KEY")
-        if openai_key:
-            result = await _extract_with_openai(text, openai_key)
-            if result["success"]:
-                logger.info("Vehicle info extracted using OpenAI")
-                return result
-        
-        # 3. Final fallback to regex
-        result = await _extract_with_regex(text)
+        result = await _extract_with_gemini(text, gemini_key)
         if result["success"]:
-            logger.info("Vehicle info extracted using regex fallback")
+            logger.info("Vehicle info extracted using Google Gemini")
             return result
-        
-        return {
-            "success": False,
-            "error": "Could not extract vehicle information from text"
-        }
+        else:
+            return {
+                "success": False,
+                "error": f"Gemini extraction failed: {result.get('error', 'Unknown error')}"
+            }
         
     except Exception as e:
         logger.error(f"Error in llm_extract_vehicle_info: {e}")
@@ -252,221 +312,66 @@ async def _extract_with_gemini(text: str, api_key: str) -> Dict[str, Any]:
         import google.generativeai as genai
         
         genai.configure(api_key=api_key)
-        model = genai.GenerativeModel('gemini-pro')
         
-        prompt = f"""
-        Analiza el siguiente texto y extrae la información del vehículo.
-        Devuelve ÚNICAMENTE un objeto JSON válido con estos campos exactos:
-        {{
-            "make": "marca del vehículo (string)",
-            "model": "modelo del vehículo (string)", 
-            "year": año del modelo (número entero o null),
-            "vin": "número VIN si está presente (string o null)"
-        }}
+        # Try different models in order of preference
+        models_to_try = [
+            'models/gemini-2.5-flash',
+            'models/gemini-2.0-flash', 
+            'models/gemini-flash-latest',
+            'models/gemini-pro-latest'
+        ]
         
-        Texto a analizar: {text}
+        for model_name in models_to_try:
+            try:
+                model = genai.GenerativeModel(model_name)
+                
+                prompt = f"""
+                Analiza el siguiente texto y extrae la información del vehículo.
+                
+                IMPORTANTE para BMW: 
+                - Si detectas "BMW Serie 3" o "BMW Series 3", usar modelo "Serie 3"
+                - Si detectas "BMW Serie 5" o "BMW Series 5", usar modelo "Serie 5"
+                - Mantener el formato original del usuario
+                
+                Devuelve ÚNICAMENTE un objeto JSON válido con estos campos exactos:
+                {{
+                    "make": "marca del vehículo (string)",
+                    "model": "modelo del vehículo (string exactamente como aparece)", 
+                    "year": año del modelo (número entero o null),
+                    "vin": "número VIN si está presente (string o null)"
+                }}
+                
+                Texto a analizar: {text}
+                
+                Responde SOLO con el JSON, sin texto adicional.
+                """
+                
+                response = model.generate_content(prompt)
+                
+                # Extract JSON from response
+                json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
+                if json_match:
+                    data = json.loads(json_match.group(0))
+                    
+                    # Validate required fields
+                    if data.get("make") and data.get("model"):
+                        logger.info(f"Successfully used Gemini model: {model_name}")
+                        return {"success": True, "data": data}
+                    else:
+                        return {"success": False, "error": "Missing required fields in Gemini response"}
+                else:
+                    return {"success": False, "error": "No valid JSON found in Gemini response"}
+                    
+            except Exception as model_error:
+                logger.warning(f"Model {model_name} failed: {model_error}")
+                if model_name == models_to_try[-1]:  # Last model
+                    raise model_error
+                continue
         
-        Responde SOLO con el JSON, sin texto adicional.
-        """
-        
-        response = model.generate_content(prompt)
-        
-        # Extract JSON from response
-        json_match = re.search(r'\{.*\}', response.text, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group(0))
-            
-            # Validate required fields
-            if data.get("make") and data.get("model"):
-                return {"success": True, "data": data}
-            else:
-                return {"success": False, "error": "Missing required fields in Gemini response"}
-        else:
-            return {"success": False, "error": "No valid JSON found in Gemini response"}
+        return {"success": False, "error": "All Gemini models failed"}
             
     except Exception as e:
         return {"success": False, "error": f"Gemini extraction failed: {e}"}
-
-async def _extract_with_openai(text: str, api_key: str) -> Dict[str, Any]:
-    """Extract vehicle info using OpenAI"""
-    try:
-        import openai
-        
-        client = openai.OpenAI(api_key=api_key)
-        
-        response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{
-                "role": "user", 
-                "content": f"""
-                Extract vehicle information from this text: "{text}"
-                
-                Return only a JSON object with:
-                {{"make": "brand", "model": "model name", "year": year_number_or_null, "vin": "vin_or_null"}}
-                """
-            }],
-            max_tokens=150,
-            temperature=0
-        )
-        
-        content = response.choices[0].message.content
-        
-        # Extract JSON from response
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if json_match:
-            data = json.loads(json_match.group(0))
-            
-            if data.get("make") and data.get("model"):
-                return {"success": True, "data": data}
-            else:
-                return {"success": False, "error": "Missing required fields in OpenAI response"}
-        else:
-            return {"success": False, "error": "No valid JSON in OpenAI response"}
-            
-    except Exception as e:
-        return {"success": False, "error": f"OpenAI extraction failed: {e}"}
-
-async def _extract_with_regex(text: str) -> Dict[str, Any]:
-    """Fallback regex-based extraction"""
-    try:
-        # Extract year (4 digits between 1990-2030)
-        year_match = re.search(r'\b(199\d|20[0-2]\d|2030)\b', text)
-        year = int(year_match.group(0)) if year_match else None
-        
-        # Extract VIN (17 alphanumeric characters)
-        vin_match = re.search(r'\b[A-HJ-NPR-Z0-9]{17}\b', text, re.IGNORECASE)
-        vin = vin_match.group(0) if vin_match else None
-        
-        # Clean text and extract make/model
-        # Remove common Spanish phrases first
-        clean_text = re.sub(r'(?i)\b(?:quiero|necesito|dime|dame|consulta|verificar|revisar|seguridad|recalls?|información|análisis|de|del|la|el|un|una|¿qué|qué|tiene|sobre|saber)\b', ' ', text)
-        
-        # Remove year and VIN from text
-        if year:
-            clean_text = re.sub(r'\b' + str(year) + r'\b', '', clean_text)
-        if vin:
-            clean_text = re.sub(r'\b' + re.escape(vin) + r'\b', '', clean_text, flags=re.IGNORECASE)
-        
-        # Remove punctuation and normalize
-        clean_text = re.sub(r'[¿?¡!.,;:]', ' ', clean_text)
-        clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-        
-        # Define known car manufacturers and models
-        known_makes = {
-            'bmw': 'BMW',
-            'toyota': 'Toyota', 
-            'ford': 'Ford',
-            'chevrolet': 'Chevrolet',
-            'honda': 'Honda',
-            'nissan': 'Nissan',
-            'jeep': 'Jeep',
-            'chrysler': 'Chrysler',
-            'dodge': 'Dodge',
-            'mercedes': 'Mercedes-Benz',
-            'audi': 'Audi',
-            'volkswagen': 'Volkswagen',
-            'hyundai': 'Hyundai',
-            'kia': 'Kia',
-            'mazda': 'Mazda',
-            'subaru': 'Subaru',
-            'mitsubishi': 'Mitsubishi'
-        }
-        
-        # BMW specific model mapping
-        bmw_models = {
-            'serie 3': '330i',
-            'series 3': '330i', 
-            '3 series': '330i',
-            '3-series': '330i',
-            'serie 5': '530i',
-            'series 5': '530i',
-            'x3': 'X3',
-            'x5': 'X5'
-        }
-        
-        # Try to find manufacturer and model
-        make = None
-        model = None
-        
-        # Split into words for analysis
-        words = clean_text.lower().split()
-        
-        # Find manufacturer
-        for i, word in enumerate(words):
-            if word in known_makes:
-                make = known_makes[word]
-                # Look for model after the make
-                remaining_words = words[i+1:]
-                
-                if make == 'BMW':
-                    # Special handling for BMW
-                    model_text = ' '.join(remaining_words).strip()
-                    
-                    # Check for known BMW model patterns
-                    for bmw_pattern, bmw_replacement in bmw_models.items():
-                        if bmw_pattern in model_text:
-                            model = bmw_replacement
-                            break
-                    
-                    # If no specific model found, try to extract numbers
-                    if not model:
-                        number_match = re.search(r'\b(\d)\b', model_text)
-                        if number_match:
-                            num = number_match.group(1)
-                            model = f"{num}30i"  # Default to 330i, 530i, etc.
-                        else:
-                            model = "330i"  # Default fallback
-                    
-                elif len(remaining_words) > 0:
-                    # For other manufacturers, take the next words as model
-                    model_parts = []
-                    for word in remaining_words:
-                        if word not in ['recalls', 'recall', 'safety', 'seguridad', 'information']:
-                            model_parts.append(word.title())
-                        else:
-                            break
-                    model = ' '.join(model_parts[:3]) if model_parts else None  # Limit to 3 words
-                
-                break
-        
-        # If manufacturer not found by name, try common patterns
-        if not make:
-            # Try patterns like "Toyota Corolla", "Ford F-150"
-            pattern_match = re.search(r'\b(BMW|Toyota|Ford|Chevrolet|Honda|Nissan|Jeep|Mercedes|Audi)\s+([A-Za-z0-9\-]+)', clean_text, re.IGNORECASE)
-            if pattern_match:
-                make = pattern_match.group(1).title()
-                model = pattern_match.group(2)
-                
-                # Special BMW handling
-                if make.upper() == 'BMW':
-                    model_lower = model.lower()
-                    if model_lower in bmw_models:
-                        model = bmw_models[model_lower]
-                    elif re.match(r'\d', model):
-                        # If it starts with a number, add 30i
-                        model = f"{model[0]}30i"
-        
-        # Final validation and cleanup
-        if make and model:
-            # Clean up model name
-            model = re.sub(r'[^\w\s\-]', '', model).strip()
-            if not model:
-                model = "Unknown"
-                
-            return {
-                "success": True,
-                "data": {
-                    "make": make,
-                    "model": model,
-                    "year": year,
-                    "vin": vin
-                }
-            }
-        else:
-            return {"success": False, "error": "Could not extract vehicle make and model from text"}
-            
-    except Exception as e:
-        return {"success": False, "error": f"Regex extraction failed: {e}"}
 
 async def send_email_smtp(to_email: str, subject: str, body: str, attachment_path: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -481,20 +386,6 @@ async def send_email_smtp(to_email: str, subject: str, body: str, attachment_pat
         smtp_username = os.getenv("SMTP_USERNAME", "")
         smtp_password = os.getenv("SMTP_PASSWORD", "")
         from_email = os.getenv("EMAIL_FROM", "vehicle-safety@mcp.local")
-        
-        # Simulation mode for development
-        if smtp_host == "localhost" and smtp_port == 1025:
-            logger.info(f"SIMULATION MODE: Email would be sent to {to_email}")
-            return {
-                "success": True,
-                "message": f"Email simulado enviado a {to_email} (modo desarrollo)",
-                "details": {
-                    "to": to_email,
-                    "subject": subject,
-                    "body_length": len(body),
-                    "attachment": attachment_path is not None
-                }
-            }
         
         # Real email sending
         with smtplib.SMTP(smtp_host, smtp_port) as server:
@@ -612,66 +503,12 @@ async def generate_markdown_report(title: str, content: str, metadata: Optional[
             "error": str(e)
         }
 
-async def web_fetch(url: str) -> Dict[str, Any]:
-    """
-    Obtiene y procesa contenido web para análisis adicional.
-    
-    Categoría: External Resource
-    Función: Web scraping y procesamiento de contenido HTML
-    """
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=30, headers={
-                "User-Agent": "MCP Vehicle Safety Analysis Bot 1.0"
-            })
-            response.raise_for_status()
-            
-            # Parse HTML content
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Extract text content
-            text_content = soup.get_text()
-            
-            # Clean up whitespace
-            text_content = re.sub(r'\s+', ' ', text_content).strip()
-            
-            # Extract title
-            title = soup.title.string if soup.title else "No title"
-            
-            # Extract meta description
-            meta_desc = ""
-            meta_tag = soup.find("meta", attrs={"name": "description"})
-            if meta_tag:
-                meta_desc = meta_tag.get("content", "")
-            
-            logger.info(f"Web content fetched from {url} ({len(text_content)} chars)")
-            
-            return {
-                "success": True,
-                "data": {
-                    "url": url,
-                    "title": title.strip(),
-                    "description": meta_desc.strip(),
-                    "content": text_content,
-                    "content_length": len(text_content),
-                    "status_code": response.status_code
-                }
-            }
-            
-    except Exception as e:
-        logger.error(f"Error fetching web content from {url}: {e}")
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
 # MCP Tools Dictionary
 mcp_tools_dict = {
     "check_vehicle_safety": check_vehicle_safety,
     "llm_extract_vehicle_info": llm_extract_vehicle_info, 
     "send_email_smtp": send_email_smtp,
-    "generate_markdown_report": generate_markdown_report,
-    "web_fetch": web_fetch
+    "generate_markdown_report": generate_markdown_report
 }
 
 # Tool descriptions for MCP protocol
@@ -679,8 +516,7 @@ mcp_tools_descriptions = {
     "check_vehicle_safety": "Consulta recalls y calificaciones de seguridad de NHTSA para un vehículo específico",
     "llm_extract_vehicle_info": "Extrae información de vehículos de texto natural usando LLM con fallbacks",
     "send_email_smtp": "Envía notificaciones por email con soporte para adjuntos", 
-    "generate_markdown_report": "Genera reportes de seguridad vehicular en formato Markdown",
-    "web_fetch": "Obtiene y procesa contenido web para análisis adicional"
+    "generate_markdown_report": "Genera reportes de seguridad vehicular en formato Markdown"
 }
 
 def format_mcp_tool_output(tool_name: str, result: Dict[str, Any]) -> str:
@@ -725,23 +561,14 @@ def format_mcp_tool_output(tool_name: str, result: Dict[str, Any]) -> str:
         else:
             return f"❌ Error generando reporte: {result.get('error', 'Unknown error')}"
     
-    elif tool_name == "web_fetch":
-        if result.get("success"):
-            data = result["data"]
-            return f"🌐 **Contenido obtenido de**: {data.get('url')}\n📰 **Título**: {data.get('title')}\n📝 **Contenido**: {data.get('content_length', 0)} caracteres"
-        else:
-            return f"❌ Error obteniendo contenido web: {result.get('error', 'Unknown error')}"
-    
     # Default formatting
     return json.dumps(result, indent=2, ensure_ascii=False)
 
-# Export all MCP tools and utilities
 __all__ = [
     "check_vehicle_safety",
     "llm_extract_vehicle_info", 
     "send_email_smtp",
     "generate_markdown_report",
-    "web_fetch",
     "mcp_tools_dict",
     "mcp_tools_descriptions",
     "format_mcp_tool_output"

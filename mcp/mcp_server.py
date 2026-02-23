@@ -11,6 +11,13 @@ import logging
 import os
 import sys
 from typing import Any, Dict, List, Optional, Sequence
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables
+project_root = Path(__file__).parent.parent
+env_path = project_root / ".env"
+load_dotenv(env_path)
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Depends, Header
@@ -36,7 +43,6 @@ except ImportError:
 # Local imports
 from tools_mcp import (
     check_vehicle_safety,
-    web_fetch,
     generate_markdown_report,
     send_email_smtp,
     llm_extract_vehicle_info,
@@ -119,18 +125,6 @@ TOOLS = [
         }
     ),
     Tool(
-        name="web_fetch",
-        description="Fetch and extract content from a web URL",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "url": {"type": "string", "description": "URL to fetch content from"},
-                "timeout": {"type": "number", "description": "Timeout in seconds (default: 10.0)"}
-            },
-            "required": ["url"]
-        }
-    ),
-    Tool(
         name="generate_markdown_report",
         description="Generate a markdown report file",
         inputSchema={
@@ -179,8 +173,6 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             )
         elif name == "llm_extract_vehicle_info":
             result = await llm_extract_vehicle_info(arguments["text"])
-        elif name == "web_fetch":
-            result = await web_fetch(url=arguments["url"])
         elif name == "generate_markdown_report":
             result = await generate_markdown_report(
                 title=arguments["title"],
@@ -189,7 +181,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             )
         elif name == "send_email_smtp":
             result = await send_email_smtp(
-                to_email=arguments["recipient"],
+                to_email=arguments["to_email"],
                 subject=arguments["subject"],
                 body=arguments["body"],
                 attachment_path=arguments.get("attachment_path")
@@ -213,11 +205,11 @@ def _sanitize_args(args: Dict[str, Any]) -> Dict[str, Any]:
     if "vin" in sanitized and sanitized["vin"]:
         sanitized["vin"] = sanitized["vin"][:4] + "***"
     # Hide email addresses
-    if "recipient" in sanitized:
-        email = sanitized["recipient"]
+    if "to_email" in sanitized:
+        email = sanitized["to_email"]
         if "@" in email:
             local, domain = email.split("@", 1)
-            sanitized["recipient"] = f"{local[:2]}***@{domain}"
+            sanitized["to_email"] = f"{local[:2]}***@{domain}"
     return sanitized
 
 # FastAPI endpoints

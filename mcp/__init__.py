@@ -15,7 +15,6 @@ from .tools_mcp import (
     llm_extract_vehicle_info,
     send_email_smtp,
     generate_markdown_report,
-    web_fetch,
     mcp_tools_dict,
     mcp_tools_descriptions,
     format_mcp_tool_output
@@ -29,7 +28,6 @@ __all__ = [
     "llm_extract_vehicle_info", 
     "send_email_smtp",
     "generate_markdown_report",
-    "web_fetch",
     "mcp_tools_dict",
     "mcp_tools_descriptions", 
     "format_mcp_tool_output"

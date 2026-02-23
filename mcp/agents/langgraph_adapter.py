@@ -18,13 +18,15 @@ try:
 except ImportError:
     from ..tools_mcp import mcp_tools_dict
 
+# Try to import LangGraph components
+HAS_LANGGRAPH = True
 try:
     from langgraph.graph import StateGraph, END
     from langgraph.prebuilt import ToolExecutor, ToolInvocation
-    HAS_LANGGRAPH = True
 except ImportError:
-    print("Warning: LangGraph not installed. Install with: pip install langgraph")
     HAS_LANGGRAPH = False
+    # Only show warning when actually trying to use LangGraph
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -39,19 +41,23 @@ class MCPClient:
     def __init__(self, base_url: str = "http://localhost:8000", token: str = "default-token"):
         self.base_url = base_url
         self.token = token
-        self.session = httpx.AsyncClient(timeout=30.0)
         self.headers = {"Authorization": f"Bearer {token}"}
+    
+    async def _get_session(self):
+        """Get a fresh HTTP session for each request"""
+        return httpx.AsyncClient(timeout=30.0)
     
     async def list_tools(self) -> List[Dict[str, Any]]:
         """List available MCP tools"""
         try:
-            response = await self.session.get(
-                f"{self.base_url}/tools",
-                headers=self.headers
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("tools", [])
+            async with await self._get_session() as client:
+                response = await client.get(
+                    f"{self.base_url}/tools",
+                    headers=self.headers
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data.get("tools", [])
         except Exception as e:
             logger.error(f"Error listing MCP tools: {e}")
             return []
@@ -60,34 +66,31 @@ class MCPClient:
         """Call an MCP tool"""
         try:
             payload = {"name": name, "arguments": arguments}
-            response = await self.session.post(
-                f"{self.base_url}/call-tool",
-                json=payload,
-                headers=self.headers
-            )
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get("success"):
-                # Extract text content from MCP response
-                content = data.get("content", [])
-                if content and isinstance(content[0], dict):
-                    text_content = content[0].get("text", "{}")
-                    try:
-                        return json.loads(text_content)
-                    except json.JSONDecodeError:
-                        return {"success": True, "result": text_content}
-                return {"success": True, "result": "Tool executed successfully"}
-            else:
-                return {"success": False, "error": data.get("error", "Unknown error")}
+            async with await self._get_session() as client:
+                response = await client.post(
+                    f"{self.base_url}/call-tool",
+                    json=payload,
+                    headers=self.headers
+                )
+                response.raise_for_status()
+                data = response.json()
                 
+                if data.get("success"):
+                    # Extract text content from MCP response
+                    content = data.get("content", [])
+                    if content and isinstance(content[0], dict):
+                        text_content = content[0].get("text", "{}")
+                        try:
+                            return json.loads(text_content)
+                        except json.JSONDecodeError:
+                            return {"success": True, "result": text_content}
+                    return {"success": True, "result": "Tool executed successfully"}
+                else:
+                    return {"success": False, "error": data.get("error", "Unknown error")}
+                    
         except Exception as e:
             logger.error(f"Error calling MCP tool {name}: {e}")
             return {"success": False, "error": str(e)}
-    
-    async def close(self):
-        """Close the HTTP session"""
-        await self.session.aclose()
 
 class MCPLangChainTool(BaseTool):
     """LangChain tool wrapper for MCP tools"""
@@ -108,7 +111,29 @@ class MCPLangChainTool(BaseTool):
     
     def _run(self, **kwargs) -> str:
         """Synchronous run (calls async version)"""
-        return asyncio.run(self._arun(**kwargs))
+        try:
+            # Check if we're already in an async context
+            loop = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                # No running loop
+                loop = None
+            
+            if loop is None:
+                # No running loop, safe to use asyncio.run()
+                return asyncio.run(self._arun(**kwargs))
+            else:
+                # We're in an async context, create a task
+                task = asyncio.create_task(self._arun(**kwargs))
+                # This will be handled by the existing loop
+                return asyncio.run_coroutine_threadsafe(
+                    self._arun(**kwargs), 
+                    loop
+                ).result(timeout=30)
+        except Exception as e:
+            logger.error(f"Error in _run: {e}")
+            return json.dumps({"success": False, "error": str(e)})
     
     async def _arun(self, **kwargs) -> str:
         """Run the MCP tool asynchronously"""
@@ -282,15 +307,23 @@ Total: {data.get('total_recalls', 0)}
         return state
     
     async def _send_email(self, state: AgentState) -> AgentState:
-        """Send email with report (simulated)"""
-        logger.info("Sending email notification...")
+        """Send email with report (only if email provided)"""
+        logger.info("Checking if email should be sent...")
+        
+        # Only send email if user provided an email address
+        user_email = state.get("user_email", "").strip()
+        if not user_email:
+            logger.info("No email provided - skipping email sending")
+            state["email_sent"] = False
+            state["email_status"] = "No email address provided - email not sent"
+            return state
         
         if not state.get("markdown_path"):
             state["error"] = "No report to send"
             return state
         
-        # For demo purposes, use a test email
-        recipient = "cliente@example.com"
+        logger.info(f"Sending email to: {user_email}")
+        
         subject = f"Reporte de Seguridad - {state['extracted_info'].get('make')} {state['extracted_info'].get('model')}"
         
         body = f"""
@@ -309,29 +342,34 @@ Sistema de Análisis de Vehículos
         result = await self.mcp_client.call_tool(
             "send_email_smtp",
             {
-                "recipient": recipient,
+                "to_email": user_email,  # Use actual user email
                 "subject": subject,
                 "body": body,
-                "simulate": True  # Force simulation for demo
+                "attachment_path": state.get("markdown_path")  # Attach the report
             }
         )
         
         if result.get("success"):
             state["email_sent"] = True
+            state["email_status"] = f"Email sent successfully to {user_email}"
+            logger.info(f"Email sent successfully to {user_email}")
         else:
             state["error"] = f"Email sending failed: {result.get('error')}"
+            state["email_sent"] = False
+            state["email_status"] = f"Email sending failed: {result.get('error')}"
         
         return state
     
-    async def run_analysis(self, user_input: str) -> Dict[str, Any]:
+    async def run_analysis(self, user_input: str, email: str = "") -> Dict[str, Any]:
         """Run complete vehicle safety analysis"""
         if not HAS_LANGGRAPH:
             # Fallback: run steps sequentially without LangGraph
-            return await self._run_sequential_analysis(user_input)
+            return await self._run_sequential_analysis(user_input, email)
         
         initial_state = {
             "messages": [],
             "user_input": user_input,
+            "user_email": email.strip(),  # Add email to state
             "extracted_info": None,
             "safety_report": None,
             "markdown_path": None,
@@ -353,11 +391,12 @@ Sistema de Análisis de Vehículos
             logger.error(f"Analysis workflow failed: {e}")
             return {"success": False, "error": str(e)}
     
-    async def _run_sequential_analysis(self, user_input: str) -> Dict[str, Any]:
+    async def _run_sequential_analysis(self, user_input: str, email: str = "") -> Dict[str, Any]:
         """Fallback sequential analysis without LangGraph"""
         state = {
             "messages": [],
             "user_input": user_input,
+            "user_email": email.strip(),  # Add email to state
             "extracted_info": None,
             "safety_report": None,
             "markdown_path": None,
@@ -396,7 +435,8 @@ Sistema de Análisis de Vehículos
     
     async def close(self):
         """Close MCP client connection"""
-        await self.mcp_client.close()
+        # MCPClient now uses context managers, no explicit close needed
+        pass
 
 # Example usage function
 async def example_usage():

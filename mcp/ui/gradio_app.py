@@ -9,8 +9,15 @@ import logging
 import os
 from pathlib import Path
 from typing import Optional, Tuple
+from dotenv import load_dotenv
 
 import gradio as gr
+
+# Load environment variables from the correct path
+# Get the project root (three levels up from mcp/ui/gradio_app.py)
+project_root = Path(__file__).parent.parent.parent
+env_path = project_root / ".env"
+load_dotenv(env_path)
 
 # Import MCP agent
 try:
@@ -18,9 +25,9 @@ try:
     from pathlib import Path
     sys.path.append(str(Path(__file__).parent.parent))
     from agents.langgraph_adapter import VehicleSafetyAgent, MCPClient
-except ImportError:
+except ImportError as e:
     # Fallback if agents module not available
-    print("Warning: Could not import MCP agent. Running in basic mode.")
+    logger.warning(f"Could not import MCP agent: {e}. Running in basic mode.")
     VehicleSafetyAgent = None
     MCPClient = None
 
@@ -55,17 +62,17 @@ class VehicleSafetyUI:
         year: Optional[int] = None,
         vin: str = "",
         email: str = ""
-    ) -> Tuple[str, str, Optional[str]]:
+    ) -> Tuple[str, Optional[str]]:
         """
         Analyze vehicle safety using MCP tools
-        Returns: (results_text, status_message, download_file_path)
+        Returns: (results_text, download_file_path)
         """
         
         try:
             # If we have the agent, use the full workflow
             if self.agent and user_text.strip():
                 logger.info(f"Running full analysis for: {user_text}")
-                result = await self.agent.run_analysis(user_text)
+                result = await self.agent.run_analysis(user_text, email)  # Pass email to agent
                 
                 if result.get("success"):
                     extracted = result.get("extracted_info", {})
@@ -75,16 +82,9 @@ class VehicleSafetyUI:
                     # Format results for display
                     results_text = self._format_safety_results(safety_report)
                     
-                    status_msg = f"""
-                    ✅ Análisis completado exitosamente
-                    - Vehículo extraído: {extracted.get('make')} {extracted.get('model')} {extracted.get('year', 'sin año')}
-                    - Reporte generado: {markdown_path}
-                    - Email enviado: {'Sí' if result.get('email_sent') else 'No'}
-                    """
-                    
-                    return results_text, status_msg, markdown_path
+                    return results_text, markdown_path
                 else:
-                    return "", f"❌ Error: {result.get('error')}", None
+                    return "", None
             
             # Fallback: use individual MCP calls
             elif self.mcp_client:
@@ -103,7 +103,7 @@ class VehicleSafetyUI:
                         vin = vin or data.get("vin", "")
                 
                 if not (make and model):
-                    return "", "❌ Error: No se pudo extraer marca y modelo del texto", None
+                    return "", None
                 
                 # Check vehicle safety
                 safety_result = await self.mcp_client.call_tool(
@@ -117,7 +117,7 @@ class VehicleSafetyUI:
                 )
                 
                 if not safety_result.get("success"):
-                    return "", f"❌ Error al consultar seguridad: {safety_result.get('error')}", None
+                    return "", None
                 
                 # Format results
                 results_text = self._format_safety_results(safety_result)
@@ -129,16 +129,14 @@ class VehicleSafetyUI:
                     if report_result.get("success"):
                         report_path = report_result.get("path")
                 
-                status_msg = f"✅ Análisis completado para {make} {model} {year or 'sin año'}"
-                
-                return results_text, status_msg, report_path
+                return results_text, report_path
             
             else:
-                return "", "❌ Error: MCP Server no disponible", None
+                return "", None
                 
         except Exception as e:
             logger.error(f"Error in vehicle analysis: {e}")
-            return "", f"❌ Error inesperado: {str(e)}", None
+            return "", None
     
     def _format_safety_results(self, safety_result: dict) -> str:
         """Format safety results for display"""
@@ -254,7 +252,7 @@ class VehicleSafetyUI:
                         model_input = gr.Textbox(label="Modelo", placeholder="Serie 3, Corolla, Focus...")
                     
                     with gr.Column():
-                        year_input = gr.Number(label="Año (opcional)", precision=0, minimum=1990, maximum=2025)
+                        year_input = gr.Number(label="Año", precision=2020, minimum=1990, maximum=2025)
                         vin_input = gr.Textbox(label="VIN (opcional)", placeholder="17 caracteres")
                 
                 email_input2 = gr.Textbox(
@@ -277,13 +275,6 @@ class VehicleSafetyUI:
                     )
                 
                 with gr.Column(scale=1):
-                    status_display = gr.Textbox(
-                        label="Estado",
-                        value="Esperando consulta...",
-                        interactive=False,
-                        lines=5
-                    )
-                    
                     download_file = gr.File(
                         label="📄 Descargar Reporte",
                         visible=False
@@ -301,7 +292,7 @@ class VehicleSafetyUI:
             analyze_btn1.click(
                 fn=sync_analyze_text,
                 inputs=[user_text_input, email_input1],
-                outputs=[results_display, status_display, download_file]
+                outputs=[results_display, download_file]
             ).then(
                 fn=lambda x: gr.update(visible=bool(x)),
                 inputs=[download_file],
@@ -311,22 +302,13 @@ class VehicleSafetyUI:
             analyze_btn2.click(
                 fn=sync_analyze_fields,
                 inputs=[make_input, model_input, year_input, vin_input, email_input2],
-                outputs=[results_display, status_display, download_file]
+                outputs=[results_display, download_file]
             ).then(
                 fn=lambda x: gr.update(visible=bool(x)),
                 inputs=[download_file],
                 outputs=[download_file]
             )
-            
-            # Footer
-            gr.Markdown("""
-            ---
-            **MCP Tools utilizadas:**
-            - `llm_extract_vehicle_info`: Extracción de información con LLM
-            - `check_vehicle_safety`: Consulta a NHTSA (recalls y safety ratings)
-            - `generate_markdown_report`: Generación de reportes
-            - `send_email_smtp`: Envío de notificaciones
-            """)
+
         
         return demo
     

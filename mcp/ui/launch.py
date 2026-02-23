@@ -10,6 +10,13 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from the correct path
+# Get the project root (three levels up from mcp/ui/launch.py)
+project_root = Path(__file__).parent.parent.parent
+env_path = project_root / ".env"
+load_dotenv(env_path)
 
 def check_mcp_server(url: str = "http://localhost:8000") -> bool:
     """Check if MCP server is running"""
@@ -37,7 +44,7 @@ def start_mcp_server():
     
     # Start server
     process = subprocess.Popen(
-        [sys.executable, "mcp_server.py", "--http"],
+        [sys.executable, "mcp/mcp_server.py", "--http"],
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE
@@ -60,10 +67,16 @@ def main():
     print("🚗 Vehicle Safety Analysis - MCP UI Launcher")
     print("=" * 50)
     
-    # Check if we're in the right directory
-    if not Path("mcp_server.py").exists():
-        print("❌ Error: mcp_server.py not found in current directory")
-        print("Please run this script from the project root directory")
+    # Change to project root directory
+    project_root = Path(__file__).parent.parent.parent
+    os.chdir(project_root)
+    print(f"📁 Working directory: {project_root}")
+    
+    # Check if we're in the right directory now
+    mcp_server_path = Path("mcp/mcp_server.py")
+    if not mcp_server_path.exists():
+        print("❌ Error: mcp/mcp_server.py not found")
+        print("Please check your project structure")
         sys.exit(1)
     
     # Check/start MCP server
@@ -88,6 +101,9 @@ def main():
     # Launch Gradio UI
     print("\n🎨 Starting Gradio interface...")
     try:
+        # Add mcp/ui to Python path
+        ui_path = Path("mcp/ui")
+        sys.path.insert(0, str(ui_path))
         from gradio_app import main as ui_main
         ui_main()
     except ImportError as e:
